@@ -53,8 +53,9 @@
     text-shadow: 0 0 3px #000, 0 0 3px #000, 1px 1px 2px #000; white-space: nowrap;
   }
 
-  /* Lighter, black-and-white basemap (depth points/labels are on other panes) */
-  .leaflet-tile-pane { filter: grayscale(1) brightness(1.25) contrast(0.9); }
+  /* Light, near-B&W basemap; partial grayscale keeps a faint blue on water
+     (land in the MML map is ~white, so it stays neutral). */
+  .leaflet-tile-pane { filter: grayscale(0.72) saturate(1.35) brightness(1.22) contrast(0.9); }
 
   /* ---- Own location marker ---- */
   .loc-wrap { position: relative; width: 40px; height: 40px; transform: scale(1.2); }
