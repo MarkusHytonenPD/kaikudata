@@ -42,11 +42,15 @@
     white-space: nowrap; text-align: center; line-height: 1;
     pointer-events: none; user-select: none;
   }
-  .wpt-inner {
+  .wpt-wrap {
     transform: rotate(var(--counter-rot, 0deg));
-    font-size: 22px; line-height: 1;
-    text-shadow: 0 0 4px #000, 0 0 4px #000;
+    display: flex; flex-direction: column; align-items: center;
     cursor: pointer;
+  }
+  .wpt-fish { font-size: 22px; line-height: 1; text-shadow: 0 0 4px #000, 0 0 4px #000; }
+  .wpt-depth {
+    font-size: 11px; font-weight: 700; color: #fff; line-height: 1; margin-top: 1px;
+    text-shadow: 0 0 3px #000, 0 0 3px #000, 1px 1px 2px #000; white-space: nowrap;
   }
 
   /* ---- Own location marker ---- */
@@ -167,19 +171,12 @@
 <div id="sidectrl">
   <button class="ctrl" id="rotBtn" title="Kartan suunta">🔓</button>
   <button class="ctrl" id="zoomBtn" title="Zoom-lukitus">🔍</button>
+  <button class="ctrl" id="unitBtn" title="Yksikkö metri/jalka">m</button>
 </div>
 
 <button id="locateBtn">📍 Hae sijainti</button>
 
-<div id="legend">
-  <b>Syvyys (m)</b>
-  <div class="row"><span class="sw" style="background:#00ff88"></span> 0–2</div>
-  <div class="row"><span class="sw" style="background:#00dd44"></span> 2–5</div>
-  <div class="row"><span class="sw" style="background:#ffdd00"></span> 5–8</div>
-  <div class="row"><span class="sw" style="background:#ff8800"></span> 8–12</div>
-  <div class="row"><span class="sw" style="background:#ff2200"></span> 12–18</div>
-  <div class="row"><span class="sw" style="background:#8800ff"></span> 18+</div>
-</div>
+<div id="legend"></div>
 
 <div id="tip"></div>
 <div id="toast"></div>
@@ -195,15 +192,20 @@
 
 const RAY_NS = "http://www.raymarine.com";
 
-/* ---------- Depth -> color ---------- */
+/* ---------- Depth -> color (reversed: shallow = purple, deep = green) ---------- */
+const BOUNDS = [2, 5, 8, 12, 18];
+const COLORS = ["#8800ff", "#ff2200", "#ff8800", "#ffdd00", "#00dd44", "#00ff88"];
 function depthColor(d) {
-  if (d < 2)  return "#00ff88";
-  if (d < 5)  return "#00dd44";
-  if (d < 8)  return "#ffdd00";
-  if (d < 12) return "#ff8800";
-  if (d < 18) return "#ff2200";
-  return "#8800ff";
+  for (let i = 0; i < BOUNDS.length; i++) if (d < BOUNDS[i]) return COLORS[i];
+  return COLORS[COLORS.length - 1];
 }
+
+/* ---------- Units (metres / feet) ---------- */
+let useFeet = false;
+const FT = 3.28084;
+function unit() { return useFeet ? "ft" : "m"; }
+function fmtShort(m) { const v = useFeet ? m * FT : m; return useFeet ? v.toFixed(0) : v.toFixed(1); }
+function fmtFull(m)  { const v = useFeet ? m * FT : m; return (useFeet ? v.toFixed(0) : v.toFixed(2)) + " " + unit(); }
 
 /* ---------- Map ---------- */
 const map = L.map("map", {
@@ -216,7 +218,7 @@ const map = L.map("map", {
 
 L.tileLayer(
   "https://avoin-karttakuva.maanmittauslaitos.fi/avoin/wmts/1.0.0/maastokartta/default/WGS84_Pseudo-Mercator/{z}/{y}/{x}.png?api-key=8ed41c4f-ff68-42a3-ae7a-970474a60cd3",
-  { maxZoom: 19, minZoom: 5, attribution: "© Maanmittauslaitos", crossOrigin: true }
+  { maxZoom: 19, minZoom: 5, attribution: "© Maanmittauslaitos", crossOrigin: true, opacity: 0.5 }
 ).addTo(map);
 
 /* ========================================================================
@@ -335,7 +337,7 @@ function rebuildLabels() {
     const ll = map.containerPointToLatLng([pick.x, pick.y]);
     const icon = L.divIcon({
       className: "",
-      html: '<div class="lbl-inner">' + pick.depth.toFixed(1) + "</div>",
+      html: '<div class="lbl-inner">' + fmtShort(pick.depth) + "</div>",
       iconSize: [40, 14], iconAnchor: [20, 7],
     });
     L.marker(ll, { icon, interactive: false, keyboard: false }).addTo(labelLayer);
@@ -361,14 +363,16 @@ function rebuildData() {
 }
 
 function addWaypointMarker(w) {
+  const depthTxt = w.depth != null
+    ? '<div class="wpt-depth">' + fmtShort(w.depth) + "</div>" : "";
   const icon = L.divIcon({
     className: "",
-    html: '<div class="wpt-inner">🐟</div>',
-    iconSize: [24, 24], iconAnchor: [12, 12],
+    html: '<div class="wpt-wrap"><div class="wpt-fish">🐟</div>' + depthTxt + "</div>",
+    iconSize: [60, 46], iconAnchor: [30, 14],
   });
   const m = L.marker([w.lat, w.lon], { icon, zIndexOffset: 1000 });
   let html = "<b>" + escapeHtml(w.name || "Waypoint") + "</b>";
-  if (w.depth != null) html += "<br>Syvyys: " + w.depth.toFixed(2) + " m";
+  if (w.depth != null) html += "<br>Syvyys: " + fmtFull(w.depth);
   m.bindPopup(html);
   m.addTo(wptLayer);
 }
@@ -510,7 +514,7 @@ function findNearest(cp) {
 map.on("mousemove", (e) => {
   const p = findNearest(e.containerPoint);
   if (p) {
-    tip.textContent = p.depth.toFixed(2) + " m";
+    tip.textContent = fmtFull(p.depth);
     tip.style.left = e.originalEvent.clientX + "px";
     tip.style.top = e.originalEvent.clientY + "px";
     tip.style.display = "block";
@@ -520,7 +524,7 @@ map.on("mouseout", () => { tip.style.display = "none"; });
 map.on("click", (e) => {
   const p = findNearest(e.containerPoint);
   if (p) {
-    tip.textContent = p.depth.toFixed(2) + " m";
+    tip.textContent = fmtFull(p.depth);
     tip.style.left = e.originalEvent.clientX + "px";
     tip.style.top = e.originalEvent.clientY + "px";
     tip.style.display = "block";
@@ -682,11 +686,54 @@ function applyZoomLock() {
 }
 zoomBtn.onclick = () => { zoomLocked = !zoomLocked; applyZoomLock(); };
 
+/* ---------- Legend (built dynamically so it follows the unit) ---------- */
+function buildLegend() {
+  const el = document.getElementById("legend");
+  const b = BOUNDS.map(x => useFeet ? Math.round(x * FT) : x);
+  let h = "<b>Syvyys (" + unit() + ")</b>";
+  for (let i = 0; i < COLORS.length; i++) {
+    let label;
+    if (i === 0) label = "0–" + b[0];
+    else if (i === COLORS.length - 1) label = b[i - 1] + "+";
+    else label = b[i - 1] + "–" + b[i];
+    h += '<div class="row"><span class="sw" style="background:' + COLORS[i] + '"></span> ' + label + "</div>";
+  }
+  el.innerHTML = h;
+}
+
+/* ---------- Unit toggle (m / ft) ---------- */
+const unitBtn = document.getElementById("unitBtn");
+unitBtn.onclick = () => {
+  useFeet = !useFeet;
+  unitBtn.textContent = unit();
+  unitBtn.classList.toggle("active", useFeet);
+  buildLegend();
+  rebuildData();  // re-renders depth labels + waypoint depth texts in new unit
+};
+
+/* ---------- Preload bundled sample data on the computer ---------- */
+async function loadPreset(url, name) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const parsed = parseGpx(await res.text(), name);
+    files.push(parsed);
+    rebuildData();
+    const b = [];
+    for (const p of parsed.points) b.push([p.lat, p.lon]);
+    for (const w of parsed.wpts) b.push([w.lat, w.lon]);
+    if (b.length) { try { map.fitBounds(b, { padding: [40, 40], maxZoom: 16 }); } catch (_) {} }
+    toast(parsed.points.length + " pistettä esiladattu");
+  } catch (_) { /* ignore (e.g. opened via file://) */ }
+}
+
 /* ---------- init ---------- */
+buildLegend();
 updateRotBtn();
 applyZoomLock();
 updateDragging(); // no rotation yet -> panning enabled until GPS heading is active
 setTimeout(() => map.invalidateSize(false), 200);
+loadPreset("sample/testidata.gpx", "testidata.gpx");
 
 /* ---------- optional offline service worker ---------- */
 if ("serviceWorker" in navigator) {
