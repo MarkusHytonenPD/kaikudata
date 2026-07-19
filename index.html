@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#1a1a2e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Kaikudata – syvyyskartta</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; width: 100%;
+    overflow: hidden; overscroll-behavior: none;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0b0b16;
+  }
+
+  /* ---- Map (rotating container, oversized so corners never show white) ---- */
+  #map {
+    position: fixed;
+    top: -30%; left: -30%;
+    width: 160%; height: 160%;
+    transform-origin: 50% 50%;
+    transform: rotate(0deg);
+    --counter-rot: 0deg;
+    background: #0b0b16;
+    z-index: 1;
+  }
+  .depth-canvas { pointer-events: none; }
+
+  /* Keep text/icons upright when the map is rotated (heading-up) */
+  .lbl-inner {
+    transform: rotate(var(--counter-rot, 0deg));
+    font-size: 12px; font-weight: 700; color: #fff;
+    text-shadow: 0 0 3px #000, 0 0 3px #000, 1px 1px 2px #000;
+    white-space: nowrap; text-align: center; line-height: 1;
+    pointer-events: none; user-select: none;
+  }
+  .wpt-inner {
+    transform: rotate(var(--counter-rot, 0deg));
+    font-size: 22px; line-height: 1;
+    text-shadow: 0 0 4px #000, 0 0 4px #000;
+    cursor: pointer;
+  }
+
+  /* ---- Own location marker ---- */
+  .loc-wrap { position: relative; width: 40px; height: 40px; }
+  .loc-arrow {
+    position: absolute; left: 50%; top: 50%;
+    width: 0; height: 0;
+    margin-left: -11px; margin-top: -30px;
+    border-left: 11px solid transparent;
+    border-right: 11px solid transparent;
+    border-bottom: 20px solid #2b8cff;
+    filter: drop-shadow(0 0 2px rgba(0,0,0,.6));
+    transform-origin: 11px 30px;
+    transform: rotate(0deg);
+  }
+  .loc-dot {
+    position: absolute; left: 50%; top: 50%;
+    width: 16px; height: 16px; margin: -8px 0 0 -8px;
+    background: #2b8cff; border: 3px solid #fff; border-radius: 50%;
+    box-shadow: 0 0 6px rgba(0,0,0,.5);
+  }
+
+  /* ---- Top bar ---- */
+  #topbar {
+    position: fixed; top: 0; left: 0; right: 0;
+    z-index: 1000;
+    background: rgba(26,26,46,.95);
+    color: #fff;
+    padding: calc(env(safe-area-inset-top, 0px) + 8px) 8px 8px 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.4);
+  }
+  #btnrow { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn {
+    background: #2b2b4a; color: #fff; border: none; border-radius: 8px;
+    padding: 0 14px; min-height: 44px; font-size: 15px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  }
+  .btn:active { background: #3a3a63; }
+  .btn.warn { background: #6a2233; }
+  #filelist { margin-top: 8px; max-height: 22vh; overflow-y: auto; }
+  .file-item {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; padding: 4px 2px; border-top: 1px solid rgba(255,255,255,.08);
+  }
+  .file-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-item .count { color: #9aa; font-variant-numeric: tabular-nums; }
+  .file-item .del {
+    background: none; border: none; color: #ff8080; font-size: 18px;
+    cursor: pointer; padding: 4px; line-height: 1;
+  }
+  #summary { font-size: 12px; color: #9aa; margin-top: 6px; }
+
+  /* ---- Right-side control buttons ---- */
+  #sidectrl {
+    position: fixed; top: calc(env(safe-area-inset-top,0px) + 96px); right: 10px;
+    z-index: 1000; display: flex; flex-direction: column; gap: 10px;
+  }
+  .ctrl {
+    width: 48px; height: 48px; border-radius: 10px; border: none;
+    background: rgba(26,26,46,.92); color: #fff; font-size: 22px;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 2px 6px rgba(0,0,0,.4); cursor: pointer;
+  }
+  .ctrl:active { background: #3a3a63; }
+  .ctrl.active { background: #2b8cff; }
+
+  /* ---- Locate button (big, when no location) ---- */
+  #locateBtn {
+    position: fixed; bottom: calc(env(safe-area-inset-bottom,0px) + 16px);
+    right: 12px; z-index: 1000;
+    background: #2b8cff; color: #fff; border: none; border-radius: 24px;
+    padding: 0 18px; height: 48px; font-size: 15px; font-weight: 700;
+    box-shadow: 0 2px 8px rgba(0,0,0,.4); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+
+  /* ---- Legend ---- */
+  #legend {
+    position: fixed; left: 10px; bottom: calc(env(safe-area-inset-bottom,0px) + 12px);
+    z-index: 1000; background: rgba(11,11,22,.8); color: #fff;
+    padding: 8px 10px; border-radius: 8px; font-size: 11px; line-height: 1.5;
+  }
+  #legend .row { display: flex; align-items: center; gap: 6px; }
+  #legend .sw { width: 14px; height: 14px; border-radius: 3px; }
+  #legend b { display: block; margin-bottom: 4px; font-size: 12px; }
+
+  /* ---- Hover/tap depth tooltip ---- */
+  #tip {
+    position: fixed; z-index: 1200; pointer-events: none;
+    background: rgba(0,0,0,.8); color: #fff; padding: 3px 7px;
+    border-radius: 5px; font-size: 13px; font-weight: 700;
+    transform: translate(-50%, -140%); display: none; white-space: nowrap;
+  }
+
+  #toast {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    z-index: 1500; background: rgba(0,0,0,.85); color: #fff;
+    padding: 8px 14px; border-radius: 8px; font-size: 13px;
+    display: none; max-width: 80vw; text-align: center;
+  }
+
+  .leaflet-container { background: #0b0b16; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="topbar">
+  <div id="btnrow">
+    <button class="btn" id="loadBtn">📁 Lataa GPX</button>
+    <button class="btn warn" id="clearBtn">🗑 Tyhjennä</button>
+  </div>
+  <div id="filelist"></div>
+  <div id="summary">Ei ladattua dataa. Valitse GPX-tiedostoja.</div>
+</div>
+
+<div id="sidectrl">
+  <button class="ctrl" id="rotBtn" title="Kartan suunta">🔓</button>
+  <button class="ctrl" id="zoomBtn" title="Zoom-lukitus">🔍</button>
+</div>
+
+<button id="locateBtn">📍 Hae sijainti</button>
+
+<div id="legend">
+  <b>Syvyys (m)</b>
+  <div class="row"><span class="sw" style="background:#00ff88"></span> 0–2</div>
+  <div class="row"><span class="sw" style="background:#00dd44"></span> 2–5</div>
+  <div class="row"><span class="sw" style="background:#ffdd00"></span> 5–8</div>
+  <div class="row"><span class="sw" style="background:#ff8800"></span> 8–12</div>
+  <div class="row"><span class="sw" style="background:#ff2200"></span> 12–18</div>
+  <div class="row"><span class="sw" style="background:#8800ff"></span> 18+</div>
+</div>
+
+<div id="tip"></div>
+<div id="toast"></div>
+
+<input type="file" id="fileInput" accept=".gpx,application/gpx+xml,application/xml,text/xml" multiple style="display:none">
+
+<script>
+"use strict";
+
+/* ========================================================================
+   Kaikudata – kaikuluotaimen GPX-syvyysdatan interaktiivinen kartta
+   ======================================================================== */
+
+const RAY_NS = "http://www.raymarine.com";
+
+/* ---------- Depth -> color ---------- */
+function depthColor(d) {
+  if (d < 2)  return "#00ff88";
+  if (d < 5)  return "#00dd44";
+  if (d < 8)  return "#ffdd00";
+  if (d < 12) return "#ff8800";
+  if (d < 18) return "#ff2200";
+  return "#8800ff";
+}
+
+/* ---------- Map ---------- */
+const map = L.map("map", {
+  center: [62.426, 26.080],
+  zoom: 14,
+  zoomControl: false,
+  attributionControl: true,
+  preferCanvas: true,
+});
+
+L.tileLayer(
+  "https://avoin-karttakuva.maanmittauslaitos.fi/avoin/wmts/1.0.0/maastokartta/default/WGS84_Pseudo-Mercator/{z}/{y}/{x}.png?api-key=8ed41c4f-ff68-42a3-ae7a-970474a60cd3",
+  { maxZoom: 19, minZoom: 5, attribution: "© Maanmittauslaitos", crossOrigin: true }
+).addTo(map);
+
+/* ========================================================================
+   Custom canvas layer that draws all depth points in one pass (fast for 50k+)
+   ======================================================================== */
+const DepthLayer = L.Layer.extend({
+  initialize() {
+    this._pts = [];        // {lat, lon, depth}
+    this._visible = [];    // {x, y, depth} in container pixels (for labels + hover)
+    this._frame = null;
+  },
+  setPoints(pts) { this._pts = pts; this._schedule(); },
+  onAdd(map) {
+    this._map = map;
+    const canvas = this._canvas = L.DomUtil.create("canvas", "depth-canvas");
+    const pane = map.getPanes().overlayPane;
+    pane.appendChild(canvas);
+    map.on("move zoom viewreset resize zoomanim", this._schedule, this);
+    map.on("moveend zoomend", this._onMoveEnd, this);
+    this._reset();
+  },
+  onRemove(map) {
+    L.DomUtil.remove(this._canvas);
+    map.off("move zoom viewreset resize zoomanim", this._schedule, this);
+    map.off("moveend zoomend", this._onMoveEnd, this);
+  },
+  _schedule() {
+    if (this._frame) return;
+    this._frame = requestAnimationFrame(() => { this._frame = null; this._reset(); });
+  },
+  _onMoveEnd() { this._reset(); rebuildLabels(); },
+  _reset() {
+    const map = this._map;
+    if (!map) return;
+    const size = map.getSize();
+    const canvas = this._canvas;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    // position the canvas over the current viewport
+    const topLeft = map.containerPointToLayerPoint([0, 0]);
+    L.DomUtil.setPosition(canvas, topLeft);
+    if (canvas.width !== size.x * dpr || canvas.height !== size.y * dpr) {
+      canvas.width = size.x * dpr; canvas.height = size.y * dpr;
+      canvas.style.width = size.x + "px"; canvas.style.height = size.y + "px";
+    }
+
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, size.x, size.y);
+
+    const b = map.getBounds();
+    const pad = 0.15;
+    const latMin = b.getSouth() - (b.getNorth() - b.getSouth()) * pad;
+    const latMax = b.getNorth() + (b.getNorth() - b.getSouth()) * pad;
+    const lonMin = b.getWest() - (b.getEast() - b.getWest()) * pad;
+    const lonMax = b.getEast() + (b.getEast() - b.getWest()) * pad;
+
+    const pts = this._pts;
+    const vis = this._visible = [];
+    let lastColor = null;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      if (p.lat < latMin || p.lat > latMax || p.lon < lonMin || p.lon > lonMax) continue;
+      const cp = map.latLngToContainerPoint([p.lat, p.lon]);
+      const col = depthColor(p.depth);
+      if (col !== lastColor) { ctx.fillStyle = col; lastColor = col; }
+      ctx.beginPath();
+      ctx.arc(cp.x, cp.y, 6, 0, 6.283185307179586);
+      ctx.fill();
+      vis.push({ x: cp.x, y: cp.y, depth: p.depth });
+    }
+  },
+});
+const depthLayer = new DepthLayer().addTo(map);
+
+/* ---------- Label + waypoint + location layers ---------- */
+const labelLayer = L.layerGroup().addTo(map);
+const wptLayer   = L.layerGroup().addTo(map);
+
+/* ========================================================================
+   Depth text labels – one per grid cell, choosing the local extreme point
+   ======================================================================== */
+function rebuildLabels() {
+  labelLayer.clearLayers();
+  const vis = depthLayer._visible;
+  if (!vis.length) return;
+
+  const CELL = 80;
+  const cells = new Map();
+  for (const p of vis) {
+    const cx = Math.floor(p.x / CELL), cy = Math.floor(p.y / CELL);
+    const key = cx + "_" + cy;
+    let c = cells.get(key);
+    if (!c) { c = { cx, cy, sum: 0, n: 0, min: p, max: p }; cells.set(key, c); }
+    c.sum += p.depth; c.n++;
+    if (p.depth < c.min.depth) c.min = p;
+    if (p.depth > c.max.depth) c.max = p;
+  }
+
+  const cellAvg = (cx, cy) => {
+    const c = cells.get(cx + "_" + cy);
+    return c ? c.sum / c.n : null;
+  };
+
+  for (const c of cells.values()) {
+    const a = c.sum / c.n;
+    let nsum = 0, nn = 0;
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+      if (!dx && !dy) continue;
+      const na = cellAvg(c.cx + dx, c.cy + dy);
+      if (na != null) { nsum += na; nn++; }
+    }
+    const nAvg = nn ? nsum / nn : a;
+    // local high -> deepest point, local low -> shallowest point
+    const pick = a >= nAvg ? c.max : c.min;
+    const ll = map.containerPointToLatLng([pick.x, pick.y]);
+    const icon = L.divIcon({
+      className: "",
+      html: '<div class="lbl-inner">' + pick.depth.toFixed(1) + "</div>",
+      iconSize: [40, 14], iconAnchor: [20, 7],
+    });
+    L.marker(ll, { icon, interactive: false, keyboard: false }).addTo(labelLayer);
+  }
+}
+
+/* ========================================================================
+   Data model
+   ======================================================================== */
+let files = [];          // {id, name, points:[], wpts:[]}
+let nextId = 1;
+
+function rebuildData() {
+  const flat = [];
+  wptLayer.clearLayers();
+  for (const f of files) {
+    for (const p of f.points) flat.push(p);
+    for (const w of f.wpts) addWaypointMarker(w);
+  }
+  depthLayer.setPoints(flat);
+  rebuildLabels();
+  renderFileList(flat.length);
+}
+
+function addWaypointMarker(w) {
+  const icon = L.divIcon({
+    className: "",
+    html: '<div class="wpt-inner">🐟</div>',
+    iconSize: [24, 24], iconAnchor: [12, 12],
+  });
+  const m = L.marker([w.lat, w.lon], { icon, zIndexOffset: 1000 });
+  let html = "<b>" + escapeHtml(w.name || "Waypoint") + "</b>";
+  if (w.depth != null) html += "<br>Syvyys: " + w.depth.toFixed(2) + " m";
+  m.bindPopup(html);
+  m.addTo(wptLayer);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ---------- GPX parsing ---------- */
+function getDepth(el) {
+  let d = el.getElementsByTagNameNS(RAY_NS, "WaterDepth");
+  if (!d.length) {
+    // fallback: match by local name regardless of namespace resolution
+    const all = el.getElementsByTagName("*");
+    for (const e of all) if (e.localName === "WaterDepth") { d = [e]; break; }
+  }
+  if (d.length) {
+    const v = parseFloat(d[0].textContent);
+    if (!isNaN(v)) return v;
+  }
+  return null;
+}
+
+function parseGpx(text, name) {
+  const doc = new DOMParser().parseFromString(text, "application/xml");
+  if (doc.getElementsByTagName("parsererror").length)
+    throw new Error("GPX-jäsennys epäonnistui");
+
+  const points = [];
+  const trkpts = doc.getElementsByTagName("trkpt");
+  for (const t of trkpts) {
+    const lat = parseFloat(t.getAttribute("lat"));
+    const lon = parseFloat(t.getAttribute("lon"));
+    if (isNaN(lat) || isNaN(lon)) continue;
+    const depth = getDepth(t);
+    if (depth == null) continue;
+    points.push({ lat, lon, depth });
+  }
+
+  const wpts = [];
+  const wptEls = doc.getElementsByTagName("wpt");
+  for (const w of wptEls) {
+    const lat = parseFloat(w.getAttribute("lat"));
+    const lon = parseFloat(w.getAttribute("lon"));
+    if (isNaN(lat) || isNaN(lon)) continue;
+    const nameEl = w.getElementsByTagName("name")[0];
+    wpts.push({
+      lat, lon,
+      name: nameEl ? nameEl.textContent.trim() : "",
+      depth: getDepth(w),
+    });
+  }
+  return { id: nextId++, name, points, wpts };
+}
+
+async function loadFiles(fileList) {
+  const arr = Array.from(fileList);
+  let added = 0, allBounds = [];
+  for (const file of arr) {
+    try {
+      const text = await file.text();
+      const parsed = parseGpx(text, file.name);
+      files.push(parsed);
+      added += parsed.points.length + parsed.wpts.length;
+      for (const p of parsed.points) allBounds.push([p.lat, p.lon]);
+      for (const w of parsed.wpts) allBounds.push([w.lat, w.lon]);
+    } catch (e) {
+      toast("Virhe: " + file.name + " – " + e.message);
+    }
+  }
+  rebuildData();
+  if (allBounds.length) {
+    try { map.fitBounds(allBounds, { padding: [40, 40], maxZoom: 16 }); } catch (_) {}
+  }
+  if (added) toast(added + " pistettä lisätty");
+}
+
+function renderFileList(totalPts) {
+  const list = document.getElementById("filelist");
+  list.innerHTML = "";
+  for (const f of files) {
+    const div = document.createElement("div");
+    div.className = "file-item";
+    const n = f.points.length + f.wpts.length;
+    div.innerHTML =
+      '<span class="name">' + escapeHtml(f.name) + "</span>" +
+      '<span class="count">' + n + " p</span>" +
+      '<button class="del" title="Poista">🗑</button>';
+    div.querySelector(".del").onclick = () => {
+      files = files.filter(x => x.id !== f.id);
+      rebuildData();
+    };
+    list.appendChild(div);
+  }
+  const sum = document.getElementById("summary");
+  if (files.length) {
+    const wpts = files.reduce((a, f) => a + f.wpts.length, 0);
+    sum.textContent = files.length + " tiedostoa · " +
+      (totalPts - wpts) + " syvyyspistettä · " + wpts + " waypointia";
+  } else {
+    sum.textContent = "Ei ladattua dataa. Valitse GPX-tiedostoja.";
+  }
+}
+
+/* ========================================================================
+   UI wiring – load / clear
+   ======================================================================== */
+const fileInput = document.getElementById("fileInput");
+document.getElementById("loadBtn").onclick = () => fileInput.click();
+fileInput.onchange = () => { if (fileInput.files.length) loadFiles(fileInput.files); fileInput.value = ""; };
+document.getElementById("clearBtn").onclick = () => {
+  files = []; rebuildData(); toast("Data tyhjennetty");
+};
+
+/* ---------- Toast ---------- */
+let toastTimer = null;
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.display = "block";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.style.display = "none"; }, 2500);
+}
+
+/* ========================================================================
+   Hover / tap tooltip showing depth of nearest point
+   ======================================================================== */
+const tip = document.getElementById("tip");
+function findNearest(cp) {
+  const vis = depthLayer._visible;
+  let best = null, bestD = 14 * 14; // px^2 threshold
+  for (const p of vis) {
+    const dx = p.x - cp.x, dy = p.y - cp.y;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  return best;
+}
+map.on("mousemove", (e) => {
+  const p = findNearest(e.containerPoint);
+  if (p) {
+    tip.textContent = p.depth.toFixed(2) + " m";
+    tip.style.left = e.originalEvent.clientX + "px";
+    tip.style.top = e.originalEvent.clientY + "px";
+    tip.style.display = "block";
+  } else tip.style.display = "none";
+});
+map.on("mouseout", () => { tip.style.display = "none"; });
+map.on("click", (e) => {
+  const p = findNearest(e.containerPoint);
+  if (p) {
+    tip.textContent = p.depth.toFixed(2) + " m";
+    tip.style.left = e.originalEvent.clientX + "px";
+    tip.style.top = e.originalEvent.clientY + "px";
+    tip.style.display = "block";
+    clearTimeout(tip._t);
+    tip._t = setTimeout(() => { tip.style.display = "none"; }, 1800);
+  }
+});
+
+/* ========================================================================
+   Own location + heading (GPS bearing, compass fallback)
+   ======================================================================== */
+let locMarker = null, locArrow = null;
+let watchId = null;
+let lastFix = null;          // {lat, lon, t}
+let heading = 0;             // degrees, 0 = north
+let haveHeading = false;
+let compassHeading = null;
+
+let headingUp = true;        // default: map rotates so course is up
+let zoomLocked = false;
+
+function toRad(d) { return d * Math.PI / 180; }
+function toDeg(r) { return r * 180 / Math.PI; }
+function bearing(a, b, c, d) {
+  const φ1 = toRad(a), φ2 = toRad(c), Δλ = toRad(d - b);
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+function haversine(a, b, c, d) {
+  const R = 6371000;
+  const dφ = toRad(c - a), dλ = toRad(d - b);
+  const s = Math.sin(dφ / 2) ** 2 + Math.cos(toRad(a)) * Math.cos(toRad(c)) * Math.sin(dλ / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+function ensureLocMarker(lat, lon) {
+  if (!locMarker) {
+    const icon = L.divIcon({
+      className: "",
+      html: '<div class="loc-wrap"><div class="loc-arrow"></div><div class="loc-dot"></div></div>',
+      iconSize: [40, 40], iconAnchor: [20, 20],
+    });
+    locMarker = L.marker([lat, lon], { icon, zIndexOffset: 2000, interactive: false }).addTo(map);
+    locArrow = locMarker.getElement().querySelector(".loc-arrow");
+  } else {
+    locMarker.setLatLng([lat, lon]);
+    if (!locArrow) locArrow = locMarker.getElement().querySelector(".loc-arrow");
+  }
+}
+
+function applyHeadingArrow() {
+  if (locArrow) locArrow.style.transform = "rotate(" + heading + "deg)";
+}
+
+function applyMapRotation() {
+  const mapEl = document.getElementById("map");
+  if (headingUp && haveHeading) {
+    mapEl.style.transform = "rotate(" + (-heading) + "deg)";
+    mapEl.style.setProperty("--counter-rot", heading + "deg");
+  } else {
+    mapEl.style.transform = "rotate(0deg)";
+    mapEl.style.setProperty("--counter-rot", "0deg");
+  }
+  updateDragging();
+}
+
+// Manual drag only makes sense when the map is NOT visually rotated
+// (Leaflet's pointer math is unaware of the CSS rotation).
+function updateDragging() {
+  if (headingUp && haveHeading) map.dragging.disable();
+  else map.dragging.enable();
+}
+
+function onPosition(pos) {
+  const lat = pos.coords.latitude, lon = pos.coords.longitude;
+  const t = pos.timestamp;
+  ensureLocMarker(lat, lon);
+
+  // heading from GPS course if available, else derive from movement
+  if (pos.coords.heading != null && !isNaN(pos.coords.heading) &&
+      pos.coords.speed != null && pos.coords.speed > 0.5) {
+    heading = pos.coords.heading; haveHeading = true;
+  } else if (lastFix) {
+    const dist = haversine(lastFix.lat, lastFix.lon, lat, lon);
+    if (dist > 3) { heading = bearing(lastFix.lat, lastFix.lon, lat, lon); haveHeading = true; }
+    else if (compassHeading != null) { heading = compassHeading; haveHeading = true; }
+  } else if (compassHeading != null) {
+    heading = compassHeading; haveHeading = true;
+  }
+  lastFix = { lat, lon, t };
+
+  applyHeadingArrow();
+  applyMapRotation();
+
+  if (headingUp) map.panTo([lat, lon], { animate: true, duration: 0.4 });
+}
+
+function startLocation() {
+  if (!("geolocation" in navigator)) { toast("Paikannus ei tuettu"); return; }
+  requestOrientationPermission();
+  if (watchId != null) return;
+  watchId = navigator.geolocation.watchPosition(onPosition,
+    (err) => { toast("Paikannusvirhe: " + err.message); },
+    { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 });
+  document.getElementById("locateBtn").style.display = "none";
+  toast("Paikannus käynnissä");
+}
+
+/* ---------- Compass fallback (used only when nearly stationary) ---------- */
+function handleOrientation(e) {
+  let h = null;
+  if (typeof e.webkitCompassHeading === "number") h = e.webkitCompassHeading; // iOS
+  else if (e.alpha != null && e.absolute) h = (360 - e.alpha) % 360;
+  if (h != null) compassHeading = h;
+}
+function requestOrientationPermission() {
+  const DOE = window.DeviceOrientationEvent;
+  if (DOE && typeof DOE.requestPermission === "function") {
+    DOE.requestPermission().then(state => {
+      if (state === "granted") window.addEventListener("deviceorientation", handleOrientation, true);
+    }).catch(() => {});
+  } else if (DOE) {
+    window.addEventListener("deviceorientationabsolute", handleOrientation, true);
+    window.addEventListener("deviceorientation", handleOrientation, true);
+  }
+}
+
+document.getElementById("locateBtn").onclick = startLocation;
+
+/* ---------- Rotation lock button ---------- */
+const rotBtn = document.getElementById("rotBtn");
+function updateRotBtn() {
+  rotBtn.textContent = headingUp ? "🔓" : "🔒";
+  rotBtn.classList.toggle("active", headingUp);
+  rotBtn.title = headingUp ? "Kartta pyörii (kulkusuunta ylös)" : "Kartta lukittu pohjoiseen";
+}
+rotBtn.onclick = () => {
+  headingUp = !headingUp;
+  updateRotBtn();
+  applyMapRotation();
+  if (headingUp && lastFix) map.panTo([lastFix.lat, lastFix.lon]);
+  setTimeout(() => { map.invalidateSize(false); depthLayer._reset(); rebuildLabels(); }, 30);
+};
+
+/* ---------- Zoom lock button ---------- */
+const zoomBtn = document.getElementById("zoomBtn");
+function applyZoomLock() {
+  if (zoomLocked) {
+    map.touchZoom.disable(); map.doubleClickZoom.disable();
+    map.scrollWheelZoom.disable(); map.boxZoom.disable();
+  } else {
+    map.touchZoom.enable(); map.doubleClickZoom.enable();
+    map.scrollWheelZoom.enable(); map.boxZoom.enable();
+  }
+  zoomBtn.textContent = zoomLocked ? "🔒" : "🔍";
+  zoomBtn.classList.toggle("active", zoomLocked);
+  zoomBtn.title = zoomLocked ? "Zoom lukittu" : "Lukitse zoom";
+}
+zoomBtn.onclick = () => { zoomLocked = !zoomLocked; applyZoomLock(); };
+
+/* ---------- init ---------- */
+updateRotBtn();
+applyZoomLock();
+updateDragging(); // no rotation yet -> panning enabled until GPS heading is active
+setTimeout(() => map.invalidateSize(false), 200);
+
+/* ---------- optional offline service worker ---------- */
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  });
+}
+</script>
+</body>
+</html>
