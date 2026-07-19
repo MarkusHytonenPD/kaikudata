@@ -722,7 +722,10 @@ async function loadPreset(url, name) {
     const b = [];
     for (const p of parsed.points) b.push([p.lat, p.lon]);
     for (const w of parsed.wpts) b.push([w.lat, w.lon]);
+    map.invalidateSize(false);
     if (b.length) { try { map.fitBounds(b, { padding: [40, 40], maxZoom: 16 }); } catch (_) {} }
+    // ensure the canvas redraws once the map size/position has settled
+    setTimeout(() => { map.invalidateSize(false); depthLayer._reset(); rebuildLabels(); }, 250);
     toast(parsed.points.length + " pistettä esiladattu");
   } catch (_) { /* ignore (e.g. opened via file://) */ }
 }
@@ -733,7 +736,7 @@ updateRotBtn();
 applyZoomLock();
 updateDragging(); // no rotation yet -> panning enabled until GPS heading is active
 setTimeout(() => map.invalidateSize(false), 200);
-loadPreset("sample/testidata.gpx", "testidata.gpx");
+loadPreset("sample/Archive_19_07_2026B_fixed.gpx", "Archive_19_07_2026B_fixed.gpx");
 
 /* ---------- offline service worker (auto-updating) ---------- */
 if ("serviceWorker" in navigator) {
