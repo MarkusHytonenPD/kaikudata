@@ -54,7 +54,7 @@
   }
 
   /* ---- Own location marker ---- */
-  .loc-wrap { position: relative; width: 40px; height: 40px; }
+  .loc-wrap { position: relative; width: 40px; height: 40px; transform: scale(1.2); }
   .loc-arrow {
     position: absolute; left: 50%; top: 50%;
     width: 0; height: 0;
@@ -287,7 +287,7 @@ const DepthLayer = L.Layer.extend({
       const col = depthColor(p.depth);
       if (col !== lastColor) { ctx.fillStyle = col; lastColor = col; }
       ctx.beginPath();
-      ctx.arc(cp.x, cp.y, 6, 0, 6.283185307179586);
+      ctx.arc(cp.x, cp.y, 3.9, 0, 6.283185307179586);
       ctx.fill();
       vis.push({ x: cp.x, y: cp.y, depth: p.depth });
     }
@@ -747,6 +747,37 @@ unitBtn.onclick = () => {
   rebuildData();  // re-renders depth labels + waypoint depth texts in new unit
 };
 
+/* ---------- Find the bounds of the densest cluster of points ---------- */
+/* Bins points into a grid, picks the fullest cell, returns the bounds of
+   that cell plus its 8 neighbours (a 3x3 block) for a nicely framed view. */
+function densestBounds(pts) {
+  if (!pts.length) return null;
+  let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+  for (const p of pts) {
+    if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
+    if (p.lon < minLon) minLon = p.lon; if (p.lon > maxLon) maxLon = p.lon;
+  }
+  const N = 40;
+  const dLat = (maxLat - minLat) / N || 1e-9;
+  const dLon = (maxLon - minLon) / N || 1e-9;
+  const grid = new Map();
+  let best = null, bestCount = 0;
+  for (const p of pts) {
+    const r = Math.min(N, Math.floor((p.lat - minLat) / dLat));
+    const c = Math.min(N, Math.floor((p.lon - minLon) / dLon));
+    const k = r * (N + 2) + c;
+    const n = (grid.get(k) || 0) + 1;
+    grid.set(k, n);
+    if (n > bestCount) { bestCount = n; best = { r, c }; }
+  }
+  if (!best) return null;
+  const loLat = Math.max(minLat + (best.r - 1) * dLat, minLat);
+  const hiLat = Math.min(minLat + (best.r + 2) * dLat, maxLat);
+  const loLon = Math.max(minLon + (best.c - 1) * dLon, minLon);
+  const hiLon = Math.min(minLon + (best.c + 2) * dLon, maxLon);
+  return [[loLat, loLon], [hiLat, hiLon]];
+}
+
 /* ---------- Preload bundled sample data on the computer ---------- */
 async function loadPreset(url, name) {
   try {
@@ -755,11 +786,17 @@ async function loadPreset(url, name) {
     const parsed = parseGpx(await res.text(), name);
     files.push(parsed);
     rebuildData();
-    const b = [];
-    for (const p of parsed.points) b.push([p.lat, p.lon]);
-    for (const w of parsed.wpts) b.push([w.lat, w.lon]);
     map.invalidateSize(false);
-    if (b.length) { try { map.fitBounds(b, { padding: [40, 40], maxZoom: 16 }); } catch (_) {} }
+    // Initial view: zoom to the densest cluster of depth points
+    const dense = densestBounds(parsed.points);
+    if (dense) {
+      try { map.fitBounds(dense, { padding: [40, 40], maxZoom: 17 }); } catch (_) {}
+    } else {
+      const b = [];
+      for (const p of parsed.points) b.push([p.lat, p.lon]);
+      for (const w of parsed.wpts) b.push([w.lat, w.lon]);
+      if (b.length) { try { map.fitBounds(b, { padding: [40, 40], maxZoom: 16 }); } catch (_) {} }
+    }
     // ensure the canvas redraws once the map size/position has settled
     setTimeout(() => { map.invalidateSize(false); depthLayer._reset(); rebuildLabels(); }, 250);
     toast(parsed.points.length + " pistettä esiladattu");
