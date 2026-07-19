@@ -218,7 +218,7 @@ const map = L.map("map", {
 
 L.tileLayer(
   "https://avoin-karttakuva.maanmittauslaitos.fi/avoin/wmts/1.0.0/maastokartta/default/WGS84_Pseudo-Mercator/{z}/{y}/{x}.png?api-key=8ed41c4f-ff68-42a3-ae7a-970474a60cd3",
-  { maxZoom: 19, minZoom: 5, attribution: "© Maanmittauslaitos", crossOrigin: true, opacity: 0.5 }
+  { maxZoom: 19, minZoom: 5, attribution: "© Maanmittauslaitos", crossOrigin: true, opacity: 1 }
 ).addTo(map);
 
 /* ========================================================================
@@ -268,6 +268,7 @@ const DepthLayer = L.Layer.extend({
     const ctx = canvas.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size.x, size.y);
+    ctx.globalAlpha = 0.6;   // GPX-syvyyspisteet läpikuultavina, tausta näkyy läpi
 
     const b = map.getBounds();
     const pad = 0.15;
@@ -490,11 +491,11 @@ document.getElementById("clearBtn").onclick = () => {
 
 /* ---------- Toast ---------- */
 let toastTimer = null;
-function toast(msg) {
+function toast(msg, ms) {
   const t = document.getElementById("toast");
   t.textContent = msg; t.style.display = "block";
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.style.display = "none"; }, 2500);
+  toastTimer = setTimeout(() => { t.style.display = "none"; }, ms || 2500);
 }
 
 /* ========================================================================
@@ -542,6 +543,7 @@ let lastFix = null;          // {lat, lon, t}
 let heading = 0;             // degrees, 0 = north
 let haveHeading = false;
 let compassHeading = null;
+let gotFix = false;          // true once a real position has arrived
 
 let headingUp = true;        // default: map rotates so course is up
 let zoomLocked = false;
@@ -604,6 +606,14 @@ function onPosition(pos) {
   const t = pos.timestamp;
   ensureLocMarker(lat, lon);
 
+  // First real fix: reveal the marker & retire the locate button
+  if (!gotFix) {
+    gotFix = true;
+    const btn = document.getElementById("locateBtn");
+    if (btn) btn.style.display = "none";
+    if (!headingUp) map.panTo([lat, lon], { animate: true, duration: 0.4 });
+  }
+
   // heading from GPS course if available, else derive from movement
   if (pos.coords.heading != null && !isNaN(pos.coords.heading) &&
       pos.coords.speed != null && pos.coords.speed > 0.5) {
@@ -624,14 +634,40 @@ function onPosition(pos) {
 }
 
 function startLocation() {
-  if (!("geolocation" in navigator)) { toast("Paikannus ei tuettu"); return; }
+  if (!("geolocation" in navigator)) { toast("Paikannus ei ole tuettu tässä selaimessa", 6000); return; }
+  if (!window.isSecureContext) {
+    toast("Paikannus vaatii suojatun yhteyden – avaa julkaistu https-osoite", 7000);
+    return;
+  }
   requestOrientationPermission();
-  if (watchId != null) return;
-  watchId = navigator.geolocation.watchPosition(onPosition,
-    (err) => { toast("Paikannusvirhe: " + err.message); },
-    { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 });
-  document.getElementById("locateBtn").style.display = "none";
-  toast("Paikannus käynnissä");
+
+  const btn = document.getElementById("locateBtn");
+  if (btn) { btn.disabled = true; btn.innerHTML = "⏳ Haetaan sijaintia…"; }
+  toast("Haetaan sijaintia…");
+
+  // Restart cleanly so the "Yritä uudelleen" button always re-triggers a fresh request.
+  if (watchId != null) navigator.geolocation.clearWatch(watchId);
+
+  // Quick single shot (often arrives before the first watch callback), then continuous tracking.
+  const opts = { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 };
+  navigator.geolocation.getCurrentPosition(onPosition, () => {},
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 });
+  watchId = navigator.geolocation.watchPosition(onPosition, onGeoError, opts);
+}
+
+function onGeoError(err) {
+  let msg;
+  if (err.code === 1)      msg = "Sijaintilupa evätty – salli sijainti selaimen ja puhelimen asetuksista, ja yritä uudelleen.";
+  else if (err.code === 2) msg = "Sijaintia ei saada – tarkista GPS/paikannus ja yritä ulkona.";
+  else if (err.code === 3) msg = "Paikannus aikakatkaistiin – yritä uudelleen.";
+  else                     msg = "Paikannusvirhe: " + (err && err.message || "tuntematon");
+  toast(msg, 6000);
+
+  // No fix yet → give the button back so the user can retry.
+  if (!gotFix) {
+    const btn = document.getElementById("locateBtn");
+    if (btn) { btn.disabled = false; btn.style.display = "inline-flex"; btn.innerHTML = "📍 Yritä uudelleen"; }
+  }
 }
 
 /* ---------- Compass fallback (used only when nearly stationary) ---------- */
