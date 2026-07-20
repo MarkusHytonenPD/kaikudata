@@ -8,6 +8,9 @@ puhelimen selaimella veneillessä. Täysin staattinen – ei palvelinta, ei buil
 ## Ominaisuudet
 
 - Lataa yksi tai useita **GPX-tiedostoja** (Raymarine Dragonfly). Uudet lisätään vanhojen päälle.
+- **Interpoloitu syvyyspinta** (🌊): väritetty pinta piirretään vain sinne, mistä on dataa.
+  Yksittäinen luotauslinja saa n. 15 m leveyden; kahden linjan väli täytetään vain jos ne
+  ovat alle 50 m etäisyydellä toisistaan. Näkymänapista voi vaihtaa: pinta → pinta+pisteet → pisteet.
 - Syvyyspisteet **värillisinä ympyröinä** (vihreä = matala → violetti = syvä), piirretään
   canvakselle joten toimii sujuvasti myös 50 000+ pisteellä.
 - **Syvyyden tekstimerkinnät** valikoiden ruudukon paikallisista ääripisteistä.

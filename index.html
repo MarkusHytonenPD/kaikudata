@@ -94,6 +94,42 @@
   }
   .btn:active { background: #3a3a63; }
   .btn.warn { background: #6a2233; }
+  .btn.active { background: #2b8cff; }
+
+  /* Waypoint edit popup */
+  .btn2 {
+    background: #2b2b4a; color: #fff; border: none; border-radius: 6px;
+    padding: 7px 10px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .btn2.del { background: #6a2233; }
+  .wpt-edit { font-size: 13px; min-width: 150px; }
+  .wpt-edit label { display: block; margin-bottom: 6px; color: #333; }
+  .wpt-edit input {
+    width: 100%; padding: 6px; font-size: 15px; box-sizing: border-box;
+    border: 1px solid #ccc; border-radius: 5px;
+  }
+  .wpt-edit-row { display: flex; gap: 8px; margin-top: 4px; }
+  .wpt-edit-row .btn2 { flex: 1; }
+
+  /* User waypoint pins */
+  .uwpt-wrap {
+    transform: rotate(var(--counter-rot, 0deg));
+    display: flex; flex-direction: column; align-items: center; cursor: pointer;
+  }
+  .uwpt-pin { font-size: 22px; line-height: 1; filter: drop-shadow(0 0 3px #000); }
+  .uwpt-depth {
+    font-size: 11px; font-weight: 700; color: #fff; line-height: 1; margin-top: -2px;
+    text-shadow: 0 0 3px #000, 0 0 3px #000, 1px 1px 2px #000; white-space: nowrap;
+  }
+
+  /* Measure readout */
+  #measureReadout {
+    position: fixed; top: calc(env(safe-area-inset-top,0px) + 120px);
+    left: 50%; transform: translateX(-50%); z-index: 1100;
+    background: rgba(43,140,255,.95); color: #fff; padding: 6px 12px;
+    border-radius: 8px; font-size: 14px; font-weight: 700;
+    box-shadow: 0 2px 6px rgba(0,0,0,.4); display: none; white-space: nowrap;
+  }
   #filelist { margin-top: 8px; max-height: 22vh; overflow-y: auto; }
   .file-item {
     display: flex; align-items: center; gap: 8px;
@@ -166,6 +202,9 @@
 <div id="topbar">
   <div id="btnrow">
     <button class="btn" id="loadBtn">📁 Lataa GPX</button>
+    <button class="btn" id="addWptBtn">➕ Merkki</button>
+    <button class="btn" id="measureBtn">📏 Mittaa</button>
+    <button class="btn" id="exportBtn">💾 Vie</button>
     <button class="btn warn" id="clearBtn">🗑 Tyhjennä</button>
   </div>
   <div id="filelist"></div>
@@ -173,6 +212,7 @@
 </div>
 
 <div id="sidectrl">
+  <button class="ctrl active" id="viewBtn" title="Näkymä: pinta / pisteet">🌊</button>
   <button class="ctrl" id="rotBtn" title="Kartan suunta">🔓</button>
   <button class="ctrl" id="zoomBtn" title="Zoom-lukitus">🔍</button>
   <button class="ctrl" id="unitBtn" title="Yksikkö metri/jalka">m</button>
@@ -184,6 +224,7 @@
 
 <div id="tip"></div>
 <div id="toast"></div>
+<div id="measureReadout"></div>
 
 <input type="file" id="fileInput" accept=".gpx,application/gpx+xml,application/xml,text/xml" multiple style="display:none">
 
@@ -203,6 +244,11 @@ function depthColor(d) {
   for (let i = 0; i < BOUNDS.length; i++) if (d < BOUNDS[i]) return COLORS[i];
   return COLORS[COLORS.length - 1];
 }
+
+/* ---------- View mode: interpolated surface / raw points / both ---------- */
+let viewMode = "surface";                                  // "surface" | "points" | "both"
+function surfaceMode() { return viewMode === "surface" || viewMode === "both"; }
+function pointsMode()  { return viewMode === "points"  || viewMode === "both"; }
 
 /* ---------- Units (metres / feet) ---------- */
 let useFeet = false;
@@ -283,25 +329,177 @@ const DepthLayer = L.Layer.extend({
 
     const pts = this._pts;
     const vis = this._visible = [];
+    const draw = pointsMode();   // in surface-only mode we still build _visible (labels/hover)
     let lastColor = null;
     for (let i = 0; i < pts.length; i++) {
       const p = pts[i];
       if (p.lat < latMin || p.lat > latMax || p.lon < lonMin || p.lon > lonMax) continue;
       const cp = map.latLngToContainerPoint([p.lat, p.lon]);
-      const col = depthColor(p.depth);
-      if (col !== lastColor) { ctx.fillStyle = col; lastColor = col; }
-      ctx.beginPath();
-      ctx.arc(cp.x, cp.y, 3.9, 0, 6.283185307179586);
-      ctx.fill();
+      if (draw) {
+        const col = depthColor(p.depth);
+        if (col !== lastColor) { ctx.fillStyle = col; lastColor = col; }
+        ctx.beginPath();
+        ctx.arc(cp.x, cp.y, 3.9, 0, 6.283185307179586);
+        ctx.fill();
+      }
       vis.push({ x: cp.x, y: cp.y, depth: p.depth });
     }
   },
 });
 const depthLayer = new DepthLayer().addTo(map);
 
+/* ========================================================================
+   Interpolated depth surface
+   Renders a filled, colour-ramped surface ONLY where the data supports it:
+     • A lone track line is given ~15 m width (SINGLE_HALF_M each side).
+     • The gap between two lines is filled only when their separation
+       (distance through the cell to a point on the opposite side) is < GAP_MAX_M.
+   Depth is interpolated with inverse-distance weighting over nearby points.
+   Everything is done in screen pixels (converted from metres via metres/pixel)
+   so it follows zoom and the heading-up rotation for free.
+   ======================================================================== */
+const SINGLE_HALF_M = 7.5;   // half-width of a lone line  -> ~15 m band
+const GAP_MAX_M     = 50;    // fill between two lines only if closer than this
+const IDW_RADIUS_M  = 30;    // depth-interpolation neighbourhood
+const CELL_PX       = 4;     // surface raster resolution (screen px per cell)
+
+map.createPane("surface");
+map.getPane("surface").style.zIndex = 350;        // below overlayPane (points=400)
+map.getPane("surface").style.pointerEvents = "none";
+
+const SurfaceLayer = L.Layer.extend({
+  initialize() { this._pts = []; },
+  setPoints(pts) { this._pts = pts; this._render(); },
+  onAdd(map) {
+    this._map = map;
+    const canvas = this._canvas = L.DomUtil.create("canvas", "surface-canvas");
+    canvas.style.pointerEvents = "none";
+    map.getPane("surface").appendChild(canvas);
+    map.on("moveend zoomend resize", this._render, this);
+    map.on("zoomstart", this._hide, this);
+    this._render();
+  },
+  onRemove(map) {
+    L.DomUtil.remove(this._canvas);
+    map.off("moveend zoomend resize", this._render, this);
+    map.off("zoomstart", this._hide, this);
+  },
+  redraw() { this._render(); },
+  _hide() { if (this._canvas) this._canvas.style.visibility = "hidden"; },
+  _render() {
+    const map = this._map, canvas = this._canvas;
+    if (!map || !canvas) return;
+    const size = map.getSize();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    L.DomUtil.setPosition(canvas, map.containerPointToLayerPoint([0, 0]));
+    if (canvas.width !== size.x * dpr || canvas.height !== size.y * dpr) {
+      canvas.width = size.x * dpr; canvas.height = size.y * dpr;
+      canvas.style.width = size.x + "px"; canvas.style.height = size.y + "px";
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, size.x, size.y);
+    if (surfaceMode() && this._pts.length) this._paint(ctx, size, map);
+    canvas.style.visibility = "visible";
+  },
+  _paint(ctx, size, map) {
+    // metres-per-pixel at the current view (roughly constant across a viewport)
+    const c = map.getCenter();
+    const pc = map.latLngToContainerPoint(c);
+    const c2 = map.containerPointToLatLng([pc.x + 64, pc.y]);
+    const mpp = (map.distance(c, c2) / 64) || 1;
+
+    const rSingle = SINGLE_HALF_M / mpp;   // px
+    const rGap    = GAP_MAX_M / mpp;        // px – search radius for the opposite side
+    const rIdw    = IDW_RADIUS_M / mpp;     // px
+
+    // project points to container px, keep those near the padded viewport
+    const padPx = rGap + 4;
+    const pxpts = [];
+    for (const p of this._pts) {
+      const cp = map.latLngToContainerPoint([p.lat, p.lon]);
+      if (cp.x < -padPx || cp.x > size.x + padPx || cp.y < -padPx || cp.y > size.y + padPx) continue;
+      pxpts.push({ x: cp.x, y: cp.y, depth: p.depth });
+    }
+    if (!pxpts.length) return;
+
+    // bucket grid for neighbour queries (bucket edge = search radius)
+    const B = Math.max(8, Math.ceil(rGap));
+    const buckets = new Map();
+    for (const p of pxpts) {
+      const k = Math.floor(p.x / B) + "," + Math.floor(p.y / B);
+      let arr = buckets.get(k); if (!arr) buckets.set(k, arr = []);
+      arr.push(p);
+    }
+    const collect = (x, y) => {
+      const bx = Math.floor(x / B), by = Math.floor(y / B), out = [];
+      for (let gx = bx - 1; gx <= bx + 1; gx++)
+        for (let gy = by - 1; gy <= by + 1; gy++) {
+          const arr = buckets.get(gx + "," + gy);
+          if (arr) for (const p of arr) out.push(p);
+        }
+      return out;
+    };
+
+    const rSingle2 = rSingle * rSingle, rGap2 = rGap * rGap, rIdw2 = rIdw * rIdw;
+
+    ctx.globalAlpha = 0.8;
+    for (let y = 0; y < size.y; y += CELL_PX) {
+      for (let x = 0; x < size.x; x += CELL_PX) {
+        const cx = x + CELL_PX / 2, cy = y + CELL_PX / 2;
+        const cand = collect(cx, cy);
+        if (!cand.length) continue;
+
+        // nearest point (a) + its direction vector
+        let a2 = Infinity, ax = 0, ay = 0;
+        for (const p of cand) {
+          const dx = p.x - cx, dy = p.y - cy, d2 = dx * dx + dy * dy;
+          if (d2 < a2) { a2 = d2; ax = dx; ay = dy; }
+        }
+        if (a2 > rGap2) continue;
+        const a = Math.sqrt(a2);
+
+        let covered = a2 <= rSingle2;                    // rule A: lone-line band
+        if (!covered) {
+          // rule B: closest point on the OPPOSITE side; fill if a + b < GAP_MAX
+          let b = Infinity;
+          for (const p of cand) {
+            const dx = p.x - cx, dy = p.y - cy;
+            if (dx * ax + dy * ay >= 0) continue;        // same side as nearest
+            const bb = Math.sqrt(dx * dx + dy * dy);
+            if (bb < b) b = bb;
+          }
+          if (b < Infinity && (a + b) <= rGap) covered = true;
+        }
+        if (!covered) continue;
+
+        // inverse-distance-weighted depth from nearby points
+        let ws = 0, ds = 0;
+        for (const p of cand) {
+          const dx = p.x - cx, dy = p.y - cy, d2 = dx * dx + dy * dy;
+          if (d2 > rIdw2) continue;
+          const w = 1 / (d2 + 1);
+          ws += w; ds += w * p.depth;
+        }
+        const depth = ws > 0 ? ds / ws : cand.reduce((m, p) => {
+          const dx = p.x - cx, dy = p.y - cy, d2 = dx * dx + dy * dy;
+          return d2 < m.d ? { d: d2, v: p.depth } : m;
+        }, { d: Infinity, v: 0 }).v;
+
+        ctx.fillStyle = depthColor(depth);
+        ctx.fillRect(x, y, CELL_PX, CELL_PX);
+      }
+    }
+  },
+});
+const surfaceLayer = new SurfaceLayer().addTo(map);
+
 /* ---------- Label + waypoint + location layers ---------- */
-const labelLayer = L.layerGroup().addTo(map);
-const wptLayer   = L.layerGroup().addTo(map);
+const labelLayer   = L.layerGroup().addTo(map);
+const wptLayer     = L.layerGroup().addTo(map);
+const userWptLayer = L.layerGroup().addTo(map);
+const measureLayer = L.layerGroup().addTo(map);
 
 /* ========================================================================
    Depth text labels – one per grid cell, choosing the local extreme point
@@ -354,6 +552,10 @@ function rebuildLabels() {
    ======================================================================== */
 let files = [];          // {id, name, points:[], wpts:[]}
 let nextId = 1;
+let userWpts = [];       // {id, lat, lon, name, depth} – user-created, editable
+let wptNextId = 1;
+let interactMode = null; // null | "addwpt" | "measure"
+let measurePts = [];     // [L.LatLng] for the measuring tool
 
 function rebuildData() {
   const flat = [];
@@ -363,8 +565,10 @@ function rebuildData() {
     for (const w of f.wpts) addWaypointMarker(w);
   }
   depthLayer.setPoints(flat);
+  surfaceLayer.setPoints(flat);
   rebuildLabels();
   renderFileList(flat.length);
+  persistState();
 }
 
 function addWaypointMarker(w) {
@@ -484,14 +688,204 @@ function renderFileList(totalPts) {
 }
 
 /* ========================================================================
+   Persistence – keep loaded data + own marks across reloads (IndexedDB)
+   ======================================================================== */
+const DB_NAME = "kaikudata-db", STORE = "kv", STATE_KEY = "state";
+let _db = null;
+function openDb() {
+  return new Promise((resolve) => {
+    let req;
+    try { req = indexedDB.open(DB_NAME, 1); } catch (_) { return resolve(null); }
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+  });
+}
+function dbGet(key) {
+  return new Promise((res) => {
+    if (!_db) return res(undefined);
+    try {
+      const r = _db.transaction(STORE, "readonly").objectStore(STORE).get(key);
+      r.onsuccess = () => res(r.result); r.onerror = () => res(undefined);
+    } catch (_) { res(undefined); }
+  });
+}
+function dbPut(key, val) {
+  return new Promise((res) => {
+    if (!_db) return res();
+    try {
+      const tx = _db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).put(val, key);
+      tx.oncomplete = () => res(); tx.onerror = () => res();
+    } catch (_) { res(); }
+  });
+}
+let _persistTimer = null;
+function persistState() {
+  if (!_db) return;
+  clearTimeout(_persistTimer);
+  _persistTimer = setTimeout(() => dbPut(STATE_KEY, { nextId, files, userWpts, wptNextId }), 400);
+}
+
+/* ---------- Small UI prefs in localStorage (unit + view mode) ---------- */
+function savePrefs() {
+  try { localStorage.setItem("kaikudata-prefs", JSON.stringify({ unit: unit(), view: viewMode })); } catch (_) {}
+}
+function restorePrefs() {
+  try {
+    const pr = JSON.parse(localStorage.getItem("kaikudata-prefs") || "{}");
+    if (pr.unit) useFeet = pr.unit === "ft";
+    if (pr.view === "surface" || pr.view === "points" || pr.view === "both") viewMode = pr.view;
+  } catch (_) {}
+}
+
+/* ========================================================================
+   User waypoints – add / edit / delete, draggable pins with an edit popup
+   ======================================================================== */
+function renderUserWpts() {
+  userWptLayer.clearLayers();
+  for (const w of userWpts) addUserWptMarker(w);
+}
+function addUserWptMarker(w) {
+  const depthTxt = w.depth != null ? '<div class="uwpt-depth">' + fmtShort(w.depth) + "</div>" : "";
+  const icon = L.divIcon({
+    className: "",
+    html: '<div class="uwpt-wrap"><div class="uwpt-pin">📍</div>' + depthTxt + "</div>",
+    iconSize: [40, 44], iconAnchor: [20, 40],
+  });
+  const m = L.marker([w.lat, w.lon], { icon, draggable: true, zIndexOffset: 1500 });
+  m._wid = w.id;
+  m.on("dragend", () => { const ll = m.getLatLng(); w.lat = ll.lat; w.lon = ll.lng; persistState(); });
+  m.bindPopup(() => userWptPopupHtml(w), { minWidth: 170 });
+  m.on("popupopen", (e) => wireWptPopup(e.popup, w, m));
+  m.addTo(userWptLayer);
+}
+function userWptPopupHtml(w) {
+  return '<div class="wpt-edit">' +
+    '<label>Nimi<br><input class="wname" value="' + escapeHtml(w.name || "") + '"></label>' +
+    '<label>Syvyys (m)<br><input class="wdepth" type="number" step="0.1" value="' +
+      (w.depth != null ? w.depth : "") + '"></label>' +
+    '<div class="wpt-edit-row"><button class="btn2 save">Tallenna</button>' +
+    '<button class="btn2 del">Poista</button></div></div>';
+}
+function wireWptPopup(popup, w, marker) {
+  const el = popup.getElement();
+  if (!el) return;
+  const nameI = el.querySelector(".wname"), depthI = el.querySelector(".wdepth");
+  el.querySelector(".save").onclick = () => {
+    w.name = nameI.value.trim();
+    const dv = parseFloat(depthI.value);
+    w.depth = isNaN(dv) ? null : dv;
+    marker.closePopup();
+    renderUserWpts();
+    persistState();
+    toast("Merkki tallennettu");
+  };
+  el.querySelector(".del").onclick = () => {
+    userWpts = userWpts.filter(x => x.id !== w.id);
+    marker.closePopup();
+    renderUserWpts();
+    persistState();
+    toast("Merkki poistettu");
+  };
+}
+function addUserWaypoint(latlng) {
+  const w = { id: wptNextId++, lat: latlng.lat, lon: latlng.lng, name: "", depth: null };
+  userWpts.push(w);
+  renderUserWpts();
+  persistState();
+  userWptLayer.eachLayer(m => { if (m._wid === w.id) m.openPopup(); });
+}
+
+/* ========================================================================
+   Distance measuring – tap to drop vertices, running total shown
+   ======================================================================== */
+const measureReadout = document.getElementById("measureReadout");
+function addMeasurePoint(latlng) { measurePts.push(latlng); redrawMeasure(); }
+function redrawMeasure() {
+  measureLayer.clearLayers();
+  if (measurePts.length) {
+    L.polyline(measurePts, { color: "#2b8cff", weight: 3, dashArray: "6 4" }).addTo(measureLayer);
+    for (const p of measurePts)
+      L.circleMarker(p, { radius: 4, color: "#fff", weight: 2, fillColor: "#2b8cff", fillOpacity: 1 })
+        .addTo(measureLayer);
+  }
+  let total = 0;
+  for (let i = 1; i < measurePts.length; i++)
+    total += haversine(measurePts[i-1].lat, measurePts[i-1].lng, measurePts[i].lat, measurePts[i].lng);
+  measureReadout.textContent = measurePts.length < 2 ? "📏 Napauta pisteitä" : "📏 " + fmtDist(total);
+}
+function fmtDist(m) {
+  if (useFeet) { const ft = m * FT; return ft >= 6076 ? (ft / 6076.12).toFixed(2) + " NM" : Math.round(ft) + " ft"; }
+  return m >= 1000 ? (m / 1000).toFixed(2) + " km" : Math.round(m) + " m";
+}
+function clearMeasure() { measurePts = []; measureLayer.clearLayers(); }
+
+/* ========================================================================
+   Interaction modes (add waypoint / measure) + GPX export
+   ======================================================================== */
+function ensureNorthUp() {
+  // CSS-rotated map confuses click→latlng, so lock north while editing
+  if (headingUp && haveHeading) {
+    headingUp = false; updateRotBtn(); applyMapRotation();
+    toast("Kartta lukittu pohjoiseen muokkausta varten");
+  }
+}
+function setMode(mode) {
+  interactMode = (interactMode === mode) ? null : mode;
+  addWptBtn.classList.toggle("active", interactMode === "addwpt");
+  measureBtn.classList.toggle("active", interactMode === "measure");
+  measureReadout.style.display = interactMode === "measure" ? "block" : "none";
+  if (interactMode) ensureNorthUp();
+  if (interactMode === "measure") { clearMeasure(); redrawMeasure(); }
+  else clearMeasure();
+  toast(interactMode === "addwpt" ? "Napauta kartalle lisätäksesi merkin"
+      : interactMode === "measure" ? "Napauta kartalle mittausta varten"
+      : "Muokkaustila pois");
+}
+function exportGpx() {
+  if (!userWpts.length && measurePts.length < 2) { toast("Ei omia merkkejä tai reittiä vietäväksi"); return; }
+  let g = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<gpx version="1.1" creator="Kaikudata" xmlns="http://www.topografix.com/GPX/1/1" ' +
+    'xmlns:raymarine="http://www.raymarine.com">\n';
+  for (const w of userWpts) {
+    g += '  <wpt lat="' + w.lat.toFixed(6) + '" lon="' + w.lon.toFixed(6) + '">' +
+         '<name>' + escapeHtml(w.name || "Waypoint") + "</name>";
+    if (w.depth != null)
+      g += '<extensions><raymarine:WaterDepth>' + w.depth.toFixed(2) + "</raymarine:WaterDepth></extensions>";
+    g += "</wpt>\n";
+  }
+  if (measurePts.length > 1) {
+    g += "  <trk><name>Kaikudata-reitti</name><trkseg>\n";
+    for (const p of measurePts)
+      g += '    <trkpt lat="' + p.lat.toFixed(6) + '" lon="' + p.lng.toFixed(6) + '"></trkpt>\n';
+    g += "  </trkseg></trk>\n";
+  }
+  g += "</gpx>\n";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([g], { type: "application/gpx+xml" }));
+  a.download = "kaikudata-omat.gpx";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  toast("GPX viety");
+}
+
+/* ========================================================================
    UI wiring – load / clear
    ======================================================================== */
 const fileInput = document.getElementById("fileInput");
 document.getElementById("loadBtn").onclick = () => fileInput.click();
 fileInput.onchange = () => { if (fileInput.files.length) loadFiles(fileInput.files); fileInput.value = ""; };
 document.getElementById("clearBtn").onclick = () => {
-  files = []; rebuildData(); toast("Data tyhjennetty");
+  files = []; rebuildData(); toast("Ladattu data tyhjennetty");
 };
+
+const addWptBtn  = document.getElementById("addWptBtn");
+const measureBtn = document.getElementById("measureBtn");
+const exportBtn  = document.getElementById("exportBtn");
+addWptBtn.onclick  = () => setMode("addwpt");
+measureBtn.onclick = () => setMode("measure");
+exportBtn.onclick  = exportGpx;
 
 /* ---------- Toast ---------- */
 let toastTimer = null;
@@ -527,6 +921,8 @@ map.on("mousemove", (e) => {
 });
 map.on("mouseout", () => { tip.style.display = "none"; });
 map.on("click", (e) => {
+  if (interactMode === "addwpt")  { addUserWaypoint(e.latlng); return; }
+  if (interactMode === "measure") { addMeasurePoint(e.latlng); return; }
   const p = findNearest(e.containerPoint);
   if (p) {
     tip.textContent = fmtFull(p.depth);
@@ -695,6 +1091,25 @@ function requestOrientationPermission() {
 
 document.getElementById("locateBtn").onclick = startLocation;
 
+/* ---------- View mode button (surface / points / both) ---------- */
+const viewBtn = document.getElementById("viewBtn");
+const VIEW_ICON = { surface: "🌊", both: "🌀", points: "⬤" };
+const VIEW_TXT  = { surface: "Interpoloitu pinta", both: "Pinta + pisteet", points: "Syvyyspisteet" };
+function applyViewMode() {
+  viewBtn.textContent = VIEW_ICON[viewMode];
+  viewBtn.classList.toggle("active", viewMode !== "points");
+  viewBtn.title = "Näkymä: " + VIEW_TXT[viewMode];
+  depthLayer._reset();
+  surfaceLayer._render();
+  rebuildLabels();
+}
+viewBtn.onclick = () => {
+  viewMode = viewMode === "surface" ? "both" : viewMode === "both" ? "points" : "surface";
+  applyViewMode();
+  savePrefs();
+  toast(VIEW_TXT[viewMode]);
+};
+
 /* ---------- Rotation lock button ---------- */
 const rotBtn = document.getElementById("rotBtn");
 function updateRotBtn() {
@@ -707,7 +1122,7 @@ rotBtn.onclick = () => {
   updateRotBtn();
   applyMapRotation();
   if (headingUp && lastFix) map.panTo([lastFix.lat, lastFix.lon]);
-  setTimeout(() => { map.invalidateSize(false); depthLayer._reset(); rebuildLabels(); }, 30);
+  setTimeout(() => { map.invalidateSize(false); depthLayer._reset(); surfaceLayer._render(); rebuildLabels(); }, 30);
 };
 
 /* ---------- Zoom lock button ---------- */
@@ -748,7 +1163,10 @@ unitBtn.onclick = () => {
   unitBtn.textContent = unit();
   unitBtn.classList.toggle("active", useFeet);
   buildLegend();
-  rebuildData();  // re-renders depth labels + waypoint depth texts in new unit
+  rebuildData();       // re-renders depth labels + waypoint depth texts in new unit
+  renderUserWpts();    // own-mark depth texts too
+  if (interactMode === "measure") redrawMeasure();
+  savePrefs();
 };
 
 /* ---------- Find the bounds of the densest cluster of points ---------- */
@@ -802,18 +1220,51 @@ async function loadPreset(url, name) {
       if (b.length) { try { map.fitBounds(b, { padding: [40, 40], maxZoom: 16 }); } catch (_) {} }
     }
     // ensure the canvas redraws once the map size/position has settled
-    setTimeout(() => { map.invalidateSize(false); depthLayer._reset(); rebuildLabels(); }, 250);
+    setTimeout(() => { map.invalidateSize(false); depthLayer._reset(); surfaceLayer._render(); rebuildLabels(); }, 250);
     toast(parsed.points.length + " pistettä esiladattu");
   } catch (_) { /* ignore (e.g. opened via file://) */ }
 }
 
 /* ---------- init ---------- */
+restorePrefs();
+unitBtn.textContent = unit();
+unitBtn.classList.toggle("active", useFeet);
 buildLegend();
+applyViewMode();  // sync the view button + initial render state to the restored pref
 updateRotBtn();
 applyZoomLock();
 updateDragging(); // no rotation yet -> panning enabled until GPS heading is active
 setTimeout(() => map.invalidateSize(false), 200);
-loadPreset("sample/Archive_19_07_2026B_fixed.gpx", "Archive_19_07_2026B_fixed.gpx");
+
+/* Restore persisted data if any; otherwise preload the bundled sample once. */
+(async function initData() {
+  _db = await openDb();
+  const saved = await dbGet(STATE_KEY);
+  if (saved === undefined) {
+    // First ever run (no stored state) -> preload the bundled sample.
+    loadPreset("sample/Archive_19_07_2026B_fixed.gpx", "Archive_19_07_2026B_fixed.gpx");
+    return;
+  }
+  // A stored state exists (possibly empty after an explicit clear) -> respect it.
+  files     = saved.files || [];
+  userWpts  = saved.userWpts || [];
+  nextId    = saved.nextId    || (files.reduce((m, f) => Math.max(m, f.id), 0) + 1);
+  wptNextId = saved.wptNextId || (userWpts.reduce((m, w) => Math.max(m, w.id), 0) + 1);
+  rebuildData();
+  renderUserWpts();
+  map.invalidateSize(false);
+  const b = [];
+  for (const f of files) {
+    for (const p of f.points) b.push([p.lat, p.lon]);
+    for (const w of f.wpts)   b.push([w.lat, w.lon]);
+  }
+  for (const w of userWpts) b.push([w.lat, w.lon]);
+  if (b.length) {
+    try { map.fitBounds(b, { padding: [40, 40], maxZoom: 16 }); } catch (_) {}
+    toast("Aiempi data palautettu");
+  }
+  setTimeout(() => { map.invalidateSize(false); depthLayer._reset(); surfaceLayer._render(); rebuildLabels(); }, 250);
+})();
 
 /* ---------- offline service worker (auto-updating) ---------- */
 if ("serviceWorker" in navigator) {
