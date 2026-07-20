@@ -47,7 +47,10 @@
     display: flex; flex-direction: column; align-items: center;
     cursor: pointer;
   }
-  .wpt-fish { font-size: 11px; line-height: 1; text-shadow: 0 0 4px #000, 0 0 4px #000; }
+  .wpt-fish {
+    font-size: 11px; line-height: 1; text-shadow: 0 0 4px #000, 0 0 4px #000;
+    transform: scale(var(--fish-scale, 1)); transform-origin: center center;
+  }
   .wpt-depth {
     font-size: 11px; font-weight: 700; color: #fff; line-height: 1; margin-top: 1px;
     text-shadow: 0 0 3px #000, 0 0 3px #000, 1px 1px 2px #000; white-space: nowrap;
@@ -240,7 +243,9 @@ const RAY_NS = "http://www.raymarine.com";
 /* ---------- Depth -> color (reversed: shallow = purple, deep = green) ---------- */
 const BOUNDS = [2, 5, 8, 12, 18];
 const COLORS = ["#8800ff", "#ff2200", "#ff8800", "#ffdd00", "#00dd44", "#00ff88"];
+const DEEP_WHITE_M = 20;   // metres – deeper areas render white (safe/open water)
 function depthColor(d) {
+  if (d >= DEEP_WHITE_M) return "#ffffff";
   for (let i = 0; i < BOUNDS.length; i++) if (d < BOUNDS[i]) return COLORS[i];
   return COLORS[COLORS.length - 1];
 }
@@ -318,7 +323,7 @@ const DepthLayer = L.Layer.extend({
     const ctx = canvas.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size.x, size.y);
-    ctx.globalAlpha = 0.6;   // GPX-syvyyspisteet läpikuultavina, tausta näkyy läpi
+    ctx.globalAlpha = 0.45;  // GPX-syvyyspisteet läpikuultavina, tausta näkyy läpi
 
     const b = map.getBounds();
     const pad = 0.15;
@@ -444,7 +449,7 @@ const SurfaceLayer = L.Layer.extend({
 
     const rSingle2 = rSingle * rSingle, rGap2 = rGap * rGap, rIdw2 = rIdw * rIdw;
 
-    ctx.globalAlpha = 0.8;
+    ctx.globalAlpha = 0.65;
     for (let y = 0; y < size.y; y += CELL_PX) {
       for (let x = 0; x < size.x; x += CELL_PX) {
         const cx = x + CELL_PX / 2, cy = y + CELL_PX / 2;
@@ -494,6 +499,19 @@ const SurfaceLayer = L.Layer.extend({
   },
 });
 const surfaceLayer = new SurfaceLayer().addTo(map);
+
+/* ---------- Fish waypoint symbols scale with the map (fixed ground size) ---------- */
+const FISH_METERS = 20;    // waypoint fish drawn ~20 m wide on the ground
+const FISH_BASE_PX = 11;   // matches .wpt-fish base font-size
+function updateFishScale() {
+  const c = map.getCenter();
+  const pc = map.latLngToContainerPoint(c);
+  const c2 = map.containerPointToLatLng([pc.x + 64, pc.y]);
+  const mpp = (map.distance(c, c2) / 64) || 1;
+  const scale = (FISH_METERS / mpp) / FISH_BASE_PX;
+  document.getElementById("map").style.setProperty("--fish-scale", scale.toFixed(3));
+}
+map.on("zoomend", updateFishScale);
 
 /* ---------- Label + waypoint + location layers ---------- */
 const labelLayer   = L.layerGroup().addTo(map);
@@ -1144,15 +1162,17 @@ zoomBtn.onclick = () => { zoomLocked = !zoomLocked; applyZoomLock(); };
 /* ---------- Legend (built dynamically so it follows the unit) ---------- */
 function buildLegend() {
   const el = document.getElementById("legend");
-  const b = BOUNDS.map(x => useFeet ? Math.round(x * FT) : x);
+  const conv = x => useFeet ? Math.round(x * FT) : +x.toFixed(1);
   let h = "<b>Syvyys (" + unit() + ")</b>";
-  for (let i = 0; i < COLORS.length; i++) {
-    let label;
-    if (i === 0) label = "0–" + b[0];
-    else if (i === COLORS.length - 1) label = b[i - 1] + "+";
-    else label = b[i - 1] + "–" + b[i];
+  let lo = 0;
+  for (let i = 0; i < COLORS.length && lo < DEEP_WHITE_M; i++) {
+    const hi = Math.min(i < BOUNDS.length ? BOUNDS[i] : DEEP_WHITE_M, DEEP_WHITE_M);
+    const label = (lo === 0 ? "0" : conv(lo)) + "–" + conv(hi);
     h += '<div class="row"><span class="sw" style="background:' + COLORS[i] + '"></span> ' + label + "</div>";
+    lo = i < BOUNDS.length ? BOUNDS[i] : DEEP_WHITE_M;
   }
+  h += '<div class="row"><span class="sw" style="background:#fff;border:1px solid #889"></span> ' +
+       conv(DEEP_WHITE_M) + "+</div>";
   el.innerHTML = h;
 }
 
@@ -1234,6 +1254,7 @@ applyViewMode();  // sync the view button + initial render state to the restored
 updateRotBtn();
 applyZoomLock();
 updateDragging(); // no rotation yet -> panning enabled until GPS heading is active
+updateFishScale();
 setTimeout(() => map.invalidateSize(false), 200);
 
 /* Restore persisted data if any; otherwise preload the bundled sample once. */
