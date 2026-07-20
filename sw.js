@@ -1,6 +1,6 @@
 /* Kaikudata service worker – offline cache for app shell + map tiles.
    HTML/data use network-first so deploys show up; tiles use cache-first. */
-const APP_CACHE = "kaikudata-app-v12";
+const APP_CACHE = "kaikudata-app-v13";
 const TILE_CACHE = "kaikudata-tiles-v1";
 const APP_ASSETS = [
   "./",

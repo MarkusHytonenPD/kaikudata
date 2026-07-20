@@ -501,15 +501,17 @@ const SurfaceLayer = L.Layer.extend({
 const surfaceLayer = new SurfaceLayer().addTo(map);
 
 /* ---------- Fish waypoint symbols scale with the map (fixed ground size) ---------- */
-const FISH_METERS = 20;    // waypoint fish drawn ~20 m wide on the ground
+const FISH_METERS = 20;    // waypoint fish target ~20 m wide on the ground...
 const FISH_BASE_PX = 11;   // matches .wpt-fish base font-size
+const FISH_MIN_PX = 6;     // ...but never smaller than this on screen (zoomed out)
+const FISH_MAX_PX = 16;    // ...and never larger (so they don't cover the surface up close)
 function updateFishScale() {
   const c = map.getCenter();
   const pc = map.latLngToContainerPoint(c);
   const c2 = map.containerPointToLatLng([pc.x + 64, pc.y]);
   const mpp = (map.distance(c, c2) / 64) || 1;
-  const scale = (FISH_METERS / mpp) / FISH_BASE_PX;
-  document.getElementById("map").style.setProperty("--fish-scale", scale.toFixed(3));
+  const px = Math.max(FISH_MIN_PX, Math.min(FISH_MAX_PX, FISH_METERS / mpp));
+  document.getElementById("map").style.setProperty("--fish-scale", (px / FISH_BASE_PX).toFixed(3));
 }
 map.on("zoomend", updateFishScale);
 
