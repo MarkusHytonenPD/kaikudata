@@ -575,6 +575,19 @@ let wptNextId = 1;
 let interactMode = null; // null | "addwpt" | "measure"
 let measurePts = [];     // [L.LatLng] for the measuring tool
 
+/* Points feeding the interpolated surface: track depths + every waypoint
+   (file + user-created) that has a depth. The point cloud stays track-only. */
+function collectSurfacePoints() {
+  const pts = [];
+  for (const f of files) {
+    for (const p of f.points) pts.push(p);
+    for (const w of f.wpts) if (w.depth != null) pts.push(w);
+  }
+  for (const w of userWpts) if (w.depth != null) pts.push(w);
+  return pts;
+}
+function refreshSurface() { surfaceLayer.setPoints(collectSurfacePoints()); }
+
 function rebuildData() {
   const flat = [];
   wptLayer.clearLayers();
@@ -583,7 +596,7 @@ function rebuildData() {
     for (const w of f.wpts) addWaypointMarker(w);
   }
   depthLayer.setPoints(flat);
-  surfaceLayer.setPoints(flat);
+  surfaceLayer.setPoints(collectSurfacePoints());
   rebuildLabels();
   renderFileList(flat.length);
   persistState();
@@ -773,7 +786,7 @@ function addUserWptMarker(w) {
   });
   const m = L.marker([w.lat, w.lon], { icon, draggable: true, zIndexOffset: 1500 });
   m._wid = w.id;
-  m.on("dragend", () => { const ll = m.getLatLng(); w.lat = ll.lat; w.lon = ll.lng; persistState(); });
+  m.on("dragend", () => { const ll = m.getLatLng(); w.lat = ll.lat; w.lon = ll.lng; refreshSurface(); persistState(); });
   m.bindPopup(() => userWptPopupHtml(w), { minWidth: 170 });
   m.on("popupopen", (e) => wireWptPopup(e.popup, w, m));
   m.addTo(userWptLayer);
@@ -796,6 +809,7 @@ function wireWptPopup(popup, w, marker) {
     w.depth = isNaN(dv) ? null : dv;
     marker.closePopup();
     renderUserWpts();
+    refreshSurface();
     persistState();
     toast("Merkki tallennettu");
   };
@@ -803,6 +817,7 @@ function wireWptPopup(popup, w, marker) {
     userWpts = userWpts.filter(x => x.id !== w.id);
     marker.closePopup();
     renderUserWpts();
+    refreshSurface();
     persistState();
     toast("Merkki poistettu");
   };
