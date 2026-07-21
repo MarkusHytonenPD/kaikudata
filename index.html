@@ -133,7 +133,14 @@
     border-radius: 8px; font-size: 14px; font-weight: 700;
     box-shadow: 0 2px 6px rgba(0,0,0,.4); display: none; white-space: nowrap;
   }
-  #filelist { margin-top: 8px; max-height: 22vh; overflow-y: auto; }
+  #panel { margin-top: 8px; }
+  #panel[hidden] { display: none; }
+  #panelActions {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;
+    padding-top: 8px; border-top: 1px solid rgba(255,255,255,.12);
+  }
+  #panelActions .btn2 { flex: 1 1 auto; min-height: 40px; }
+  #filelist { max-height: 40vh; overflow-y: auto; }
   .file-item {
     display: flex; align-items: center; gap: 8px;
     font-size: 13px; padding: 4px 2px; border-top: 1px solid rgba(255,255,255,.08);
@@ -176,9 +183,17 @@
     z-index: 1000; background: rgba(11,11,22,.8); color: #fff;
     padding: 8px 10px; border-radius: 8px; font-size: 11px; line-height: 1.5;
   }
-  #legend .row { display: flex; align-items: center; gap: 6px; }
-  #legend .sw { width: 14px; height: 14px; border-radius: 3px; }
-  #legend b { display: block; margin-bottom: 4px; font-size: 12px; }
+  #legend b { display: block; margin-bottom: 6px; font-size: 12px; }
+  #legend .legend-body { display: flex; gap: 6px; height: 108px; }
+  #legend .legend-bar {
+    width: 14px; height: 100%; border-radius: 3px;
+    border: 1px solid rgba(255,255,255,.35);
+  }
+  #legend .legend-ticks { position: relative; width: 22px; }
+  #legend .tick {
+    position: absolute; left: 0; transform: translateY(50%);
+    font-variant-numeric: tabular-nums; line-height: 1;
+  }
 
   /* ---- Hover/tap depth tooltip ---- */
   #tip {
@@ -204,14 +219,21 @@
 
 <div id="topbar">
   <div id="btnrow">
-    <button class="btn" id="loadBtn">📁 Lataa GPX</button>
+    <button class="btn" id="loadBtn">📁 Lataa</button>
     <button class="btn" id="addWptBtn">➕ Merkki</button>
     <button class="btn" id="measureBtn">📏 Mittaa</button>
-    <button class="btn" id="exportBtn">💾 Vie</button>
-    <button class="btn warn" id="clearBtn">🗑 Tyhjennä</button>
+    <button class="btn" id="menuBtn">📋 <span id="fileCount">0</span></button>
   </div>
-  <div id="filelist"></div>
-  <div id="summary">Ei ladattua dataa. Valitse GPX-tiedostoja.</div>
+  <div id="panel" hidden>
+    <div id="filelist"></div>
+    <div id="summary">Ei ladattua dataa. Valitse GPX-tiedostoja.</div>
+    <div id="panelActions">
+      <button class="btn2" id="exportBtn">💾 Vie GPX</button>
+      <button class="btn2" id="exportAllBtn">⬆️ Vie data</button>
+      <button class="btn2" id="importBtn">⬇️ Tuo data</button>
+      <button class="btn2 del" id="clearBtn">🗑 Tyhjennä</button>
+    </div>
+  </div>
 </div>
 
 <div id="sidectrl">
@@ -230,6 +252,7 @@
 <div id="measureReadout"></div>
 
 <input type="file" id="fileInput" accept=".gpx,application/gpx+xml,application/xml,text/xml" multiple style="display:none">
+<input type="file" id="importInput" accept=".json,application/json" style="display:none">
 
 <script>
 "use strict";
@@ -240,14 +263,51 @@
 
 const RAY_NS = "http://www.raymarine.com";
 
-/* ---------- Depth -> color (reversed: shallow = purple, deep = green) ---------- */
-const BOUNDS = [2, 5, 8, 12, 18];
-const COLORS = ["#8800ff", "#ff2200", "#ff8800", "#ffdd00", "#00dd44", "#00ff88"];
+/* ---------- Depth -> color ----------------------------------------------
+   Smooth ramp (warm/shallow = danger → cool/deep = safe). Within each hue it
+   runs dark→light before shifting hue, so small depth changes stay readable.
+   ≥ DEEP_WHITE_M renders white (safe open water). Colours are interpolated
+   between control stops and cached in 0.25 m buckets for speed. */
 const DEEP_WHITE_M = 20;   // metres – deeper areas render white (safe/open water)
+const DEPTH_RAMP = [
+  [0.0,  0x60, 0x00, 0x18],  // very dark red   – very shallow (danger)
+  [1.0,  0xa3, 0x00, 0x1f],  // dark red
+  [2.0,  0xe0, 0x10, 0x14],  // red
+  [3.0,  0xff, 0x45, 0x00],  // red-orange
+  [4.5,  0xff, 0x8c, 0x00],  // orange
+  [6.0,  0xff, 0xc2, 0x2e],  // light orange
+  [7.5,  0xf2, 0xe8, 0x00],  // yellow
+  [9.0,  0xbf, 0xe4, 0x00],  // yellow-green
+  [11.0, 0x4f, 0xcf, 0x1f],  // green
+  [13.0, 0x00, 0xc6, 0x6e],  // green-teal
+  [15.0, 0x00, 0xbc, 0xb4],  // teal
+  [17.0, 0x1e, 0x9e, 0xff],  // blue
+  [19.0, 0x8f, 0xcb, 0xff],  // pale blue
+  [20.0, 0xff, 0xff, 0xff],  // white (deep/safe)
+];
+function _hex2(n) { return (n < 16 ? "0" : "") + n.toString(16); }
+function rampColorAt(d) {
+  const R = DEPTH_RAMP;
+  if (d <= R[0][0]) return "#" + _hex2(R[0][1]) + _hex2(R[0][2]) + _hex2(R[0][3]);
+  for (let i = 1; i < R.length; i++) {
+    if (d <= R[i][0]) {
+      const a = R[i - 1], b = R[i], t = (d - a[0]) / (b[0] - a[0]);
+      const r = Math.round(a[1] + (b[1] - a[1]) * t);
+      const g = Math.round(a[2] + (b[2] - a[2]) * t);
+      const bl = Math.round(a[3] + (b[3] - a[3]) * t);
+      return "#" + _hex2(r) + _hex2(g) + _hex2(bl);
+    }
+  }
+  return "#ffffff";
+}
+const _colorCache = new Map();
 function depthColor(d) {
   if (d >= DEEP_WHITE_M) return "#ffffff";
-  for (let i = 0; i < BOUNDS.length; i++) if (d < BOUNDS[i]) return COLORS[i];
-  return COLORS[COLORS.length - 1];
+  if (d < 0) d = 0;
+  const q = Math.round(d * 4) / 4;            // 0.25 m buckets (~80 entries)
+  let c = _colorCache.get(q);
+  if (c === undefined) { c = rampColorAt(q); _colorCache.set(q, c); }
+  return c;
 }
 
 /* ---------- View mode: interpolated surface / raw points / both ---------- */
@@ -718,6 +778,8 @@ function renderFileList(totalPts) {
   } else {
     sum.textContent = "Ei ladattua dataa. Valitse GPX-tiedostoja.";
   }
+  const fc = document.getElementById("fileCount");
+  if (fc) fc.textContent = String(files.length);
 }
 
 /* ========================================================================
@@ -905,6 +967,62 @@ function exportGpx() {
   toast("GPX viety");
 }
 
+/* ---------- Full-data export / import (move everything between devices) ----
+   Bundles ALL loaded files + own marks into one JSON file. On another device,
+   "Tuo data" merges it in: files are keyed by name (imported replaces same
+   name), own marks are deduped by position+name+depth so re-import is safe. */
+function downloadBlob(text, mime, filename) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: mime }));
+  a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+function exportAllData() {
+  if (!files.length && !userWpts.length) { toast("Ei dataa vietäväksi"); return; }
+  const payload = { app: "kaikudata", version: 1, files, userWpts };
+  downloadBlob(JSON.stringify(payload), "application/json", "kaikudata-tallenne.json");
+  toast("Koko data viety tiedostoon");
+}
+function wptKey(w) {
+  return w.lat.toFixed(6) + "|" + w.lon.toFixed(6) + "|" + (w.name || "") + "|" +
+    (w.depth == null ? "" : w.depth);
+}
+function importAllData(text) {
+  let d;
+  try { d = JSON.parse(text); } catch (_) { toast("Virheellinen tiedosto"); return; }
+  if (!d || d.app !== "kaikudata" || (!Array.isArray(d.files) && !Array.isArray(d.userWpts))) {
+    toast("Ei kelvollinen kaikudata-tallenne"); return;
+  }
+  let addedFiles = 0, addedWpts = 0;
+  for (const f of (d.files || [])) {
+    if (!f || typeof f.name !== "string") continue;
+    files = files.filter(x => x.name !== f.name);   // imported replaces same name
+    files.push({
+      id: nextId++, name: f.name,
+      points: Array.isArray(f.points) ? f.points : [],
+      wpts: Array.isArray(f.wpts) ? f.wpts : [],
+    });
+    addedFiles++;
+  }
+  const seen = new Set(userWpts.map(wptKey));
+  for (const w of (d.userWpts || [])) {
+    if (!w || typeof w.lat !== "number" || typeof w.lon !== "number") continue;
+    const nw = { id: wptNextId++, lat: w.lat, lon: w.lon, name: w.name || "",
+                 depth: (w.depth == null ? null : w.depth) };
+    const k = wptKey(nw);
+    if (seen.has(k)) continue;
+    seen.add(k); userWpts.push(nw); addedWpts++;
+  }
+  rebuildData();
+  renderUserWpts();
+  const b = [];
+  for (const f of files) { for (const p of f.points) b.push([p.lat, p.lon]); for (const w of f.wpts) b.push([w.lat, w.lon]); }
+  for (const w of userWpts) b.push([w.lat, w.lon]);
+  if (b.length) { try { map.fitBounds(b, { padding: [40, 40], maxZoom: 16 }); } catch (_) {} }
+  toast("Tuotu: " + addedFiles + " tiedostoa, " + addedWpts + " merkkiä");
+}
+
 /* ========================================================================
    UI wiring – load / clear
    ======================================================================== */
@@ -915,12 +1033,31 @@ document.getElementById("clearBtn").onclick = () => {
   files = []; rebuildData(); toast("Ladattu data tyhjennetty");
 };
 
+/* Collapsible panel (file list + data actions) – keeps the map area free */
+const menuBtn = document.getElementById("menuBtn");
+const panel   = document.getElementById("panel");
+menuBtn.onclick = () => {
+  const open = panel.hasAttribute("hidden");
+  if (open) panel.removeAttribute("hidden"); else panel.setAttribute("hidden", "");
+  menuBtn.classList.toggle("active", open);
+};
+
 const addWptBtn  = document.getElementById("addWptBtn");
 const measureBtn = document.getElementById("measureBtn");
 const exportBtn  = document.getElementById("exportBtn");
 addWptBtn.onclick  = () => setMode("addwpt");
 measureBtn.onclick = () => setMode("measure");
 exportBtn.onclick  = exportGpx;
+
+/* Full-data export / import */
+const importInput = document.getElementById("importInput");
+document.getElementById("exportAllBtn").onclick = exportAllData;
+document.getElementById("importBtn").onclick = () => importInput.click();
+importInput.onchange = async () => {
+  const f = importInput.files[0];
+  if (f) { try { importAllData(await f.text()); } catch (_) { toast("Tiedoston luku epäonnistui"); } }
+  importInput.value = "";
+};
 
 /* ---------- Toast ---------- */
 let toastTimer = null;
@@ -1176,21 +1313,28 @@ function applyZoomLock() {
 }
 zoomBtn.onclick = () => { zoomLocked = !zoomLocked; applyZoomLock(); };
 
-/* ---------- Legend (built dynamically so it follows the unit) ---------- */
+/* ---------- Legend – compact vertical gradient bar (follows the unit) ---------- */
 function buildLegend() {
   const el = document.getElementById("legend");
-  const conv = x => useFeet ? Math.round(x * FT) : +x.toFixed(1);
-  let h = "<b>Syvyys (" + unit() + ")</b>";
-  let lo = 0;
-  for (let i = 0; i < COLORS.length && lo < DEEP_WHITE_M; i++) {
-    const hi = Math.min(i < BOUNDS.length ? BOUNDS[i] : DEEP_WHITE_M, DEEP_WHITE_M);
-    const label = (lo === 0 ? "0" : conv(lo)) + "–" + conv(hi);
-    h += '<div class="row"><span class="sw" style="background:' + COLORS[i] + '"></span> ' + label + "</div>";
-    lo = i < BOUNDS.length ? BOUNDS[i] : DEEP_WHITE_M;
+  const conv = x => useFeet ? Math.round(x * FT) : +x.toFixed(0);
+  // CSS gradient from the same ramp (0 m at the bottom, DEEP_WHITE_M+ at the top)
+  const stops = DEPTH_RAMP.map(s => {
+    const pct = Math.round((s[0] / DEEP_WHITE_M) * 100);
+    return "#" + _hex2(s[1]) + _hex2(s[2]) + _hex2(s[3]) + " " + pct + "%";
+  }).join(", ");
+  // Tick labels at even depths (0, 5, 10, 15, 20+)
+  let ticks = "";
+  for (let d = 0; d <= DEEP_WHITE_M; d += 5) {
+    const bottom = (d / DEEP_WHITE_M) * 100;
+    const lbl = conv(d) + (d >= DEEP_WHITE_M ? "+" : "");
+    ticks += '<span class="tick" style="bottom:' + bottom + '%">' + lbl + "</span>";
   }
-  h += '<div class="row"><span class="sw" style="background:#fff;border:1px solid #889"></span> ' +
-       conv(DEEP_WHITE_M) + "+</div>";
-  el.innerHTML = h;
+  el.innerHTML =
+    "<b>Syvyys (" + unit() + ")</b>" +
+    '<div class="legend-body">' +
+      '<div class="legend-bar" style="background:linear-gradient(to top, ' + stops + ')"></div>' +
+      '<div class="legend-ticks">' + ticks + "</div>" +
+    "</div>";
 }
 
 /* ---------- Unit toggle (m / ft) ---------- */
@@ -1237,29 +1381,42 @@ function densestBounds(pts) {
   return [[loLat, loLon], [hiLat, hiLon]];
 }
 
-/* ---------- Preload bundled sample data on the computer ---------- */
-async function loadPreset(url, name) {
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return;
-    const parsed = parseGpx(await res.text(), name);
-    files.push(parsed);
-    rebuildData();
-    map.invalidateSize(false);
-    // Initial view: zoom to the densest cluster of depth points
-    const dense = densestBounds(parsed.points);
-    if (dense) {
-      try { map.fitBounds(dense, { padding: [40, 40], maxZoom: 17 }); } catch (_) {}
-    } else {
-      const b = [];
-      for (const p of parsed.points) b.push([p.lat, p.lon]);
-      for (const w of parsed.wpts) b.push([w.lat, w.lon]);
-      if (b.length) { try { map.fitBounds(b, { padding: [40, 40], maxZoom: 16 }); } catch (_) {} }
-    }
-    // ensure the canvas redraws once the map size/position has settled
-    setTimeout(() => { map.invalidateSize(false); depthLayer._reset(); surfaceLayer._render(); rebuildLabels(); }, 250);
-    toast(parsed.points.length + " pistettä esiladattu");
-  } catch (_) { /* ignore (e.g. opened via file://) */ }
+/* ---------- Bundled base data (preloaded on a fresh device) ----------
+   These GPX files ship in the repo, so every device sees them from GitHub
+   Pages and the service worker keeps them available offline. */
+const PRESET_FILES = [
+  "sample/Archive_19_07_2026B_fixed.gpx",
+  "sample/A.gpx",
+  "sample/E.gpx",
+  "sample/TracksO.gpx",
+];
+async function loadPresets(urls) {
+  let total = 0;
+  const allPts = [];
+  for (const url of urls) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const name = url.split("/").pop();
+      const parsed = parseGpx(await res.text(), name);
+      files.push(parsed);
+      total += parsed.points.length + parsed.wpts.length;
+      for (const p of parsed.points) allPts.push(p);
+    } catch (_) { /* ignore (e.g. opened via file://) */ }
+  }
+  if (!files.length) return;
+  rebuildData();
+  map.invalidateSize(false);
+  // Initial view: zoom to the densest cluster across all preset depth points
+  const dense = densestBounds(allPts);
+  if (dense) {
+    try { map.fitBounds(dense, { padding: [40, 40], maxZoom: 17 }); } catch (_) {}
+  } else {
+    const b = allPts.map(p => [p.lat, p.lon]);
+    if (b.length) { try { map.fitBounds(b, { padding: [40, 40], maxZoom: 16 }); } catch (_) {} }
+  }
+  setTimeout(() => { map.invalidateSize(false); depthLayer._reset(); surfaceLayer._render(); rebuildLabels(); }, 250);
+  toast(files.length + " tiedostoa · " + total + " pistettä esiladattu");
 }
 
 /* ---------- init ---------- */
@@ -1279,8 +1436,8 @@ setTimeout(() => map.invalidateSize(false), 200);
   _db = await openDb();
   const saved = await dbGet(STATE_KEY);
   if (saved === undefined) {
-    // First ever run (no stored state) -> preload the bundled sample.
-    loadPreset("sample/Archive_19_07_2026B_fixed.gpx", "Archive_19_07_2026B_fixed.gpx");
+    // First ever run (no stored state) -> preload the bundled base data.
+    loadPresets(PRESET_FILES);
     return;
   }
   // A stored state exists (possibly empty after an explicit clear) -> respect it.
