@@ -1,6 +1,6 @@
 /* Kaikudata service worker – offline cache for app shell + map tiles.
    HTML/data use network-first so deploys show up; tiles use cache-first. */
-const APP_CACHE = "kaikudata-app-v16";
+const APP_CACHE = "kaikudata-app-v17";
 const TILE_CACHE = "kaikudata-tiles-v1";
 const APP_ASSETS = [
   "./",
@@ -59,7 +59,9 @@ self.addEventListener("fetch", (e) => {
     return;
   }
 
-  // Everything else (our HTML/JS/GPX): network-first, fall back to cache offline
+  // Everything else on our origin (HTML, JS, and ALL GPX incl. sample/ base data):
+  // network-first so a fresh deploy / updated base data always wins when online;
+  // fall back to the cached copy offline.
   e.respondWith(
     fetch(req).then(res => {
       if (res.ok && url.startsWith(self.location.origin)) {
@@ -67,6 +69,13 @@ self.addEventListener("fetch", (e) => {
         caches.open(APP_CACHE).then(c => c.put(req, clone));
       }
       return res;
-    }).catch(() => caches.match(req).then(hit => hit || caches.match("./index.html")))
+    }).catch(async () => {
+      const hit = await caches.match(req);
+      if (hit) return hit;
+      // Offline with no cached copy: only page navigations fall back to the app
+      // shell; asset requests (GPX/JS) get a real error, not the HTML page.
+      if (req.mode === "navigate") return caches.match("./index.html");
+      return Response.error();
+    })
   );
 });
