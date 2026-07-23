@@ -1029,8 +1029,12 @@ function importAllData(text) {
 const fileInput = document.getElementById("fileInput");
 document.getElementById("loadBtn").onclick = () => fileInput.click();
 fileInput.onchange = () => { if (fileInput.files.length) loadFiles(fileInput.files); fileInput.value = ""; };
-document.getElementById("clearBtn").onclick = () => {
-  files = []; rebuildData(); toast("Ladattu data tyhjennetty");
+document.getElementById("clearBtn").onclick = async () => {
+  // Clear user-added files but keep the bundled base data (always present).
+  files = [];
+  await loadPresets(PRESET_FILES);
+  rebuildData();
+  toast("Omat tiedostot tyhjennetty · pohjadata säilytetty");
 };
 
 /* Collapsible panel (file list + data actions) – keeps the map area free */
@@ -1389,34 +1393,25 @@ const PRESET_FILES = [
   "sample/A.gpx",
   "sample/E.gpx",
   "sample/TracksO.gpx",
+  "sample/TracksD.gpx",
 ];
+/* Merge the bundled base data into `files`. Adds only presets not already loaded
+   (matched by file name), so it is safe to run on EVERY startup and never
+   duplicates. Returns the depth points that were newly added (for framing). */
 async function loadPresets(urls) {
-  let total = 0;
-  const allPts = [];
+  const added = [];
   for (const url of urls) {
+    const name = url.split("/").pop();
+    if (files.some(f => f.name === name)) continue;  // already present (restored or merged earlier)
     try {
       const res = await fetch(url);
       if (!res.ok) continue;
-      const name = url.split("/").pop();
       const parsed = parseGpx(await res.text(), name);
       files.push(parsed);
-      total += parsed.points.length + parsed.wpts.length;
-      for (const p of parsed.points) allPts.push(p);
+      for (const p of parsed.points) added.push(p);
     } catch (_) { /* ignore (e.g. opened via file://) */ }
   }
-  if (!files.length) return;
-  rebuildData();
-  map.invalidateSize(false);
-  // Initial view: zoom to the densest cluster across all preset depth points
-  const dense = densestBounds(allPts);
-  if (dense) {
-    try { map.fitBounds(dense, { padding: [40, 40], maxZoom: 17 }); } catch (_) {}
-  } else {
-    const b = allPts.map(p => [p.lat, p.lon]);
-    if (b.length) { try { map.fitBounds(b, { padding: [40, 40], maxZoom: 16 }); } catch (_) {} }
-  }
-  setTimeout(() => { map.invalidateSize(false); depthLayer._reset(); surfaceLayer._render(); rebuildLabels(); }, 250);
-  toast(files.length + " tiedostoa · " + total + " pistettä esiladattu");
+  return added;
 }
 
 /* ---------- init ---------- */
@@ -1431,32 +1426,42 @@ updateDragging(); // no rotation yet -> panning enabled until GPS heading is act
 updateFishScale();
 setTimeout(() => map.invalidateSize(false), 200);
 
-/* Restore persisted data if any; otherwise preload the bundled sample once. */
+/* Restore persisted data, then ALWAYS merge in the bundled base data so it shows
+   on every device (and any newly shipped preset reaches devices that already have
+   a stored state). User-added files and own marks are preserved. */
 (async function initData() {
   _db = await openDb();
   const saved = await dbGet(STATE_KEY);
-  if (saved === undefined) {
-    // First ever run (no stored state) -> preload the bundled base data.
-    loadPresets(PRESET_FILES);
-    return;
+  const fresh = (saved === undefined);
+  if (!fresh) {
+    files     = saved.files || [];
+    userWpts  = saved.userWpts || [];
+    nextId    = saved.nextId    || (files.reduce((m, f) => Math.max(m, f.id), 0) + 1);
+    wptNextId = saved.wptNextId || (userWpts.reduce((m, w) => Math.max(m, w.id), 0) + 1);
   }
-  // A stored state exists (possibly empty after an explicit clear) -> respect it.
-  files     = saved.files || [];
-  userWpts  = saved.userWpts || [];
-  nextId    = saved.nextId    || (files.reduce((m, f) => Math.max(m, f.id), 0) + 1);
-  wptNextId = saved.wptNextId || (userWpts.reduce((m, w) => Math.max(m, w.id), 0) + 1);
-  rebuildData();
+  // Base data is guaranteed present on every device.
+  const addedPts = await loadPresets(PRESET_FILES);
+  rebuildData();       // also persists (so merged presets stay available offline)
   renderUserWpts();
   map.invalidateSize(false);
-  const b = [];
-  for (const f of files) {
-    for (const p of f.points) b.push([p.lat, p.lon]);
-    for (const w of f.wpts)   b.push([w.lat, w.lon]);
-  }
-  for (const w of userWpts) b.push([w.lat, w.lon]);
-  if (b.length) {
-    try { map.fitBounds(b, { padding: [40, 40], maxZoom: 16 }); } catch (_) {}
-    toast("Aiempi data palautettu");
+  if (fresh) {
+    // First run: zoom to the densest cluster across the preloaded depth points.
+    const dense = densestBounds(addedPts);
+    try {
+      if (dense) map.fitBounds(dense, { padding: [40, 40], maxZoom: 17 });
+      else if (addedPts.length) map.fitBounds(addedPts.map(p => [p.lat, p.lon]), { padding: [40, 40], maxZoom: 16 });
+    } catch (_) {}
+    if (files.length) toast(files.length + " tiedostoa esiladattu");
+  } else {
+    // Returning device: fit everything currently loaded.
+    const b = [];
+    for (const f of files) {
+      for (const p of f.points) b.push([p.lat, p.lon]);
+      for (const w of f.wpts)   b.push([w.lat, w.lon]);
+    }
+    for (const w of userWpts) b.push([w.lat, w.lon]);
+    if (b.length) { try { map.fitBounds(b, { padding: [40, 40], maxZoom: 16 }); } catch (_) {} }
+    toast(addedPts.length ? "Data palautettu · pohjadata päivitetty" : "Aiempi data palautettu");
   }
   setTimeout(() => { map.invalidateSize(false); depthLayer._reset(); surfaceLayer._render(); rebuildLabels(); }, 250);
 })();
