@@ -1,6 +1,6 @@
 /* Kaikudata service worker – offline cache for app shell + map tiles.
    HTML/data use network-first so deploys show up; tiles use cache-first. */
-const APP_CACHE = "kaikudata-app-v17";
+const APP_CACHE = "kaikudata-app-v18";
 const TILE_CACHE = "kaikudata-tiles-v1";
 const APP_ASSETS = [
   "./",
@@ -11,6 +11,8 @@ const APP_ASSETS = [
   "./sample/E.gpx",
   "./sample/TracksO.gpx",
   "./sample/TracksD.gpx",
+  "./sample/F.gpx",
+  "./sample/TracksG.gpx",
   "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css",
   "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
 ];
